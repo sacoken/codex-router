@@ -528,6 +528,188 @@ export function normalizeSchemaLiterals(schema, depth = 0) {
   return next;
 }
 
+// Moonshot rejects a union node that declares its own `type` beside the
+// branches:
+//
+//   tools.function.parameters is not a valid moonshot flavored json schema,
+//   details: <At path 'properties.tasks_attributes.items': when using anyOf,
+//            type should be defined in anyOf items instead of the parent schema>
+//
+// The Codex App connector pack ships exactly that shape: Apollo's bulk task
+// create roots each array item in an `anyOf` whose branches already declare
+// `type: "object"`, while the union node repeats it. Like every other
+// Moonshot schema rejection, this fails the whole request, so a kimi session
+// dies on its first message even when it never creates a task.
+//
+// Moving the declared type into each branch that lacks one keeps the union's
+// meaning. Branches that already declare their own type keep it, and `$ref`
+// branches are left alone because their target may carry the type. Other
+// union-parent constraints are handled by the next pass. Children are walked
+// before the union itself is rewritten so a deeper repair can never be
+// clobbered by this pass.
+function distributeUnionTypes(schema, depth = 0) {
+  if (!isPlainObject(schema) || depth > MAX_LITERAL_DEPTH) return schema;
+
+  let next = schema;
+  const replace = (key, value) => {
+    if (next === schema) next = { ...schema };
+    if (value === undefined) delete next[key];
+    else next[key] = value;
+  };
+
+  for (const keyword of SCHEMA_MAP_KEYWORDS) {
+    const node = schema[keyword];
+    if (!isPlainObject(node)) continue;
+    let changed = false;
+    const rewritten = {};
+    for (const [name, child] of Object.entries(node)) {
+      const distributed = distributeUnionTypes(child, depth + 1);
+      if (distributed !== child) changed = true;
+      rewritten[name] = distributed;
+    }
+    if (changed) replace(keyword, rewritten);
+  }
+
+  for (const keyword of [...SCHEMA_LIST_KEYWORDS, ...SCHEMA_CHILD_KEYWORDS]) {
+    const node = schema[keyword];
+    if (Array.isArray(node)) {
+      let changed = false;
+      const rewritten = node.map((child) => {
+        const distributed = distributeUnionTypes(child, depth + 1);
+        if (distributed !== child) changed = true;
+        return distributed;
+      });
+      if (changed) replace(keyword, rewritten);
+      continue;
+    }
+    if (!isPlainObject(node)) continue;
+    const distributed = distributeUnionTypes(node, depth + 1);
+    if (distributed !== node) replace(keyword, distributed);
+  }
+
+  for (const keyword of ["anyOf", "oneOf"]) {
+    const branches = next[keyword];
+    if (!Array.isArray(branches) || next.type === undefined) continue;
+    let injected = false;
+    const rewritten = branches.map((branch) => {
+      if (
+        !isPlainObject(branch) ||
+        branch.type !== undefined ||
+        typeof branch.$ref === "string"
+      ) {
+        return branch;
+      }
+      injected = true;
+      return { ...branch, type: next.type };
+    });
+    replace("type", undefined);
+    if (injected) replace(keyword, rewritten);
+  }
+
+  return next;
+}
+
+// The type repair exposes a second Moonshot restriction on the same Apollo
+// tool: `properties` and `required` may not appear beside `anyOf` when the
+// branches repeat them.
+//
+//   ... conflicting keywords found in anyOf with parent: keywords
+//       (properties, required) are defined on the parent schema and inside
+//       anyOf; remove them from the parent or from anyOf branches
+//
+// Deleting the parent side blindly would widen the schema. Instead, fold the
+// parent constraint into every object branch first, then remove it from the
+// parent. Identical constraints collapse without touching branch identity;
+// mixed constraints keep both halves. `$ref` and boolean branches are skipped
+// because their target or meaning cannot be safely merged here.
+function mergeUnionKeyword(parentValue, branchValue, keyword) {
+  if (branchValue === undefined) return structuredClone(parentValue);
+  if (keyword === "required") {
+    return [...new Set([...(branchValue ?? []), ...(parentValue ?? [])])];
+  }
+  if (keyword === "properties") {
+    const merged = {
+      ...structuredClone(parentValue),
+      ...structuredClone(branchValue),
+    };
+    return merged;
+  }
+  return structuredClone(branchValue);
+}
+
+function deduplicateUnionKeywords(schema, depth = 0) {
+  if (!isPlainObject(schema) || depth > MAX_LITERAL_DEPTH) return schema;
+
+  let next = schema;
+  const replace = (key, value) => {
+    if (next === schema) next = { ...schema };
+    if (value === undefined) delete next[key];
+    else next[key] = value;
+  };
+
+  for (const keyword of SCHEMA_MAP_KEYWORDS) {
+    const node = schema[keyword];
+    if (!isPlainObject(node)) continue;
+    let changed = false;
+    const rewritten = {};
+    for (const [name, child] of Object.entries(node)) {
+      const deduplicated = deduplicateUnionKeywords(child, depth + 1);
+      if (deduplicated !== child) changed = true;
+      rewritten[name] = deduplicated;
+    }
+    if (changed) replace(keyword, rewritten);
+  }
+
+  for (const keyword of [...SCHEMA_LIST_KEYWORDS, ...SCHEMA_CHILD_KEYWORDS]) {
+    const node = schema[keyword];
+    if (Array.isArray(node)) {
+      let changed = false;
+      const rewritten = node.map((child) => {
+        const deduplicated = deduplicateUnionKeywords(child, depth + 1);
+        if (deduplicated !== child) changed = true;
+        return deduplicated;
+      });
+      if (changed) replace(keyword, rewritten);
+      continue;
+    }
+    if (!isPlainObject(node)) continue;
+    const deduplicated = deduplicateUnionKeywords(node, depth + 1);
+    if (deduplicated !== node) replace(keyword, deduplicated);
+  }
+
+  for (const keyword of ["anyOf", "oneOf"]) {
+    for (const constraint of ["properties", "required"]) {
+      const branches = next[keyword];
+      if (!Array.isArray(branches) || !branches.length) continue;
+      if (
+        !branches.every(
+          (branch) => isPlainObject(branch) && typeof branch.$ref !== "string",
+        )
+      ) {
+        continue;
+      }
+      const parentValue = next[constraint];
+      if (parentValue === undefined) continue;
+      const identical = branches.every((branch) =>
+        JSON.stringify(branch[constraint]) === JSON.stringify(parentValue)
+      );
+      if (!identical) {
+        const rewritten = branches.map((branch) => ({
+          ...branch,
+          [constraint]: mergeUnionKeyword(parentValue, branch[constraint], constraint),
+        }));
+        replace(constraint, undefined);
+        replace(keyword, rewritten);
+        continue;
+      } else {
+        replace(constraint, undefined);
+      }
+    }
+  }
+
+  return next;
+}
+
 // The one provider-facing normalization: literals aligned with the type their
 // own node declares, and a union root merged into a plain object. Returns
 // `schema` unchanged when neither applies.
@@ -550,7 +732,10 @@ function hasNullableObjectRoot(schema) {
 
 export function providerToolSchema(schema) {
   const normalized = normalizeSchemaLiterals(schema);
-  if (!isPlainObject(normalized)) return normalized;
+  let normalizedSchema = distributeUnionTypes(normalized);
+  if (!isPlainObject(normalizedSchema)) return normalizedSchema;
+  normalizedSchema = deduplicateUnionKeywords(normalizedSchema);
+  if (!isPlainObject(normalizedSchema)) return normalizedSchema;
   // Two independent upstreams reject a nullable object root by name, which is
   // what promotes it from "unusual" to documented alongside the union:
   //
@@ -562,6 +747,8 @@ export function providerToolSchema(schema) {
   // required and additionalProperties all survive -- because only the root's
   // own `null` alternative is dropped, and a tool call whose entire argument
   // object is null is not a call any of these providers can dispatch.
-  if (!hasRootUnion(normalized) && !hasNullableObjectRoot(normalized)) return normalized;
-  return objectRootToolSchema(normalized);
+  if (!hasRootUnion(normalizedSchema) && !hasNullableObjectRoot(normalizedSchema)) {
+    return normalizedSchema;
+  }
+  return objectRootToolSchema(normalizedSchema);
 }

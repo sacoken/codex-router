@@ -386,6 +386,119 @@ test("providerToolSchema fixes a union root and its literals together", () => {
   assert.deepEqual(normalized.properties.mode.enum, ["view"]);
 });
 
+// Moonshot rejects a union node that declares `type` beside the branches:
+// "when using anyOf, type should be defined in anyOf items instead of the
+// parent schema". Apollo's bulk task create ships that shape, and the
+// rejection fails the whole kimi request rather than the one tool.
+test("a union node's own type moves into branches that lack one", () => {
+  const schema = {
+    type: "array",
+    items: {
+      type: "object",
+      additionalProperties: false,
+      anyOf: [{ required: ["contact_id"], type: "object" }, { required: ["account_id"] }],
+    },
+  };
+
+  const repaired = providerToolSchema(schema);
+  assert.equal(repaired.type, "array");
+  assert.equal("type" in repaired.items, false);
+  assert.equal(repaired.items.anyOf[0].type, "object");
+  assert.equal(repaired.items.anyOf[1].type, "object");
+  assert.equal(repaired.items.additionalProperties, false);
+});
+
+test("a union node with typed branches only drops its own type", () => {
+  const schema = {
+    type: "array",
+    items: {
+      type: "object",
+      anyOf: [
+        { required: ["contact_id"], type: "object" },
+        { required: ["account_id"], type: "object" },
+      ],
+    },
+  };
+
+  const repaired = providerToolSchema(schema);
+  assert.equal("type" in repaired.items, false);
+  assert.deepEqual(
+    repaired.items.anyOf,
+    schema.items.anyOf,
+    "branches that already declare a type are kept by identity",
+  );
+});
+
+test("a union node without a sibling type is untouched", () => {
+  const schema = {
+    type: "array",
+    items: { anyOf: [{ type: "object" }, { type: "string" }] },
+  };
+  assert.equal(providerToolSchema(schema), schema);
+});
+
+// After the type repair, Apollo's bulk task schema still has `properties` and
+// `required` on both the union parent and every branch. Moonshot calls this a
+// conflicting-keywords rejection and fails the whole request.
+test("union parent constraints fold into branches before the parent copy is dropped", () => {
+  const property = { type: "string" };
+  const schema = {
+    type: "array",
+    items: {
+      additionalProperties: false,
+      anyOf: [
+        {
+          properties: { contact_id: property },
+          required: ["contact_id"],
+          type: "object",
+        },
+        {
+          properties: { account_id: property },
+          required: ["account_id"],
+          type: "object",
+        },
+      ],
+      properties: {
+        account_id: property,
+        contact_id: property,
+        user_id: property,
+      },
+      required: ["user_id"],
+      type: "object",
+    },
+  };
+
+  const repaired = providerToolSchema(schema);
+  assert.equal("properties" in repaired.items, false);
+  assert.equal("required" in repaired.items, false);
+  assert.deepEqual(repaired.items.anyOf[0].required, ["contact_id", "user_id"]);
+  assert.deepEqual(repaired.items.anyOf[1].required, ["account_id", "user_id"]);
+  assert.deepEqual(Object.keys(repaired.items.anyOf[0].properties).sort(), [
+    "account_id",
+    "contact_id",
+    "user_id",
+  ]);
+  assert.equal(repaired.items.additionalProperties, false);
+});
+
+test("identical union constraints collapse without rewriting branches", () => {
+  const properties = { user_id: { type: "string" } };
+  const branch = { properties, required: ["user_id"], type: "object" };
+  const schema = {
+    items: {
+      anyOf: [branch, branch],
+      properties,
+      required: ["user_id"],
+    },
+    type: "array",
+  };
+
+  const repaired = providerToolSchema(schema);
+  assert.equal("properties" in repaired.items, false);
+  assert.equal("required" in repaired.items, false);
+  assert.deepEqual(repaired.items.anyOf, [branch, branch]);
+});
+
 // providerToolSchema runs on every namespace and MCP tool, where schemas are
 // server-defined. objectRootToolSchema collapses any root it cannot recognize
 // into an empty object -- correct for xAI, which rejects every non-object root,
