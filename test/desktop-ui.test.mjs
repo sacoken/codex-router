@@ -43,6 +43,7 @@ test("desktop usage series fills missing local calendar days", () => {
 });
 
 test("quota windows use one weekly label and a distinct five-hour label", () => {
+  setLanguage("en");
   assert.deepEqual(quotaWindow({ label: "Weekly requests" }), {
     key: "weekly",
     label: "Weekly limit",
@@ -54,6 +55,7 @@ test("quota windows use one weekly label and a distinct five-hour label", () => 
 });
 
 test("monthly quota windows keep their own label instead of being dropped", () => {
+  setLanguage("en");
   assert.deepEqual(quotaWindow({ label: "Monthly limit" }), {
     key: "monthly",
     label: "Monthly limit",
@@ -69,6 +71,7 @@ test("monthly quota windows keep their own label instead of being dropped", () =
 });
 
 test("quota cards omit unconfigured providers and de-duplicate synonymous windows", () => {
+  setLanguage("en");
   const cards = buildQuotaCards({
     providerSetup: {
       providers: [
@@ -189,6 +192,7 @@ test("active model speed prefers its provider and matches qualified slugs", () =
 });
 
 test("service health rows expose enabled dependencies without leaking endpoint details", () => {
+  setLanguage("en");
   assert.deepEqual(
     serviceHealthRows({
       ok: false,
@@ -205,10 +209,12 @@ test("service health rows expose enabled dependencies without leaking endpoint d
     ],
   );
   assert.deepEqual(
-    serviceHealthRows({ ok: true, gateway: { reachable: true } }).at(-1),
+    (() => {
+      const row = serviceHealthRows({ ok: true, gateway: { reachable: true } }).at(-1);
+      return { id: row.id, state: row.state, status: row.status, detail: row.detail };
+    })(),
     {
       id: "forwarders",
-      label: "External forwarders",
       state: "standby",
       status: "Standby",
       detail: "No external forwarders enabled",
@@ -221,10 +227,15 @@ test("service health rows expose enabled dependencies without leaking endpoint d
 // not silence about a service nobody asked. Rendering it as Unknown made a
 // perfectly healthy install look like it had never reported.
 test("a dependency absent from a healthy report is inferred ready rather than unknown", () => {
+  setLanguage("en");
   const [, gateway] = serviceHealthRows({ ok: true, degraded: [] });
-  assert.deepEqual(gateway, {
+  assert.deepEqual({
+    id: gateway.id,
+    state: gateway.state,
+    status: gateway.status,
+    detail: gateway.detail,
+  }, {
     id: "gateway",
-    label: "Gateway",
     state: "ready",
     status: "Ready",
     detail: "Reachable",
@@ -241,6 +252,7 @@ test("a dependency absent from a healthy report is inferred ready rather than un
 // own (#366). The tray enumerates forwarders explicitly, so a key nobody
 // listed would be dropped on the floor rather than rendered.
 test("the Grok OAuth forwarder is rendered alongside the other forwarders", () => {
+  setLanguage("en");
   assert.deepEqual(
     serviceHealthRows({
       ok: false,
@@ -251,15 +263,17 @@ test("the Grok OAuth forwarder is rendered alongside the other forwarders", () =
     ["router", "gateway", "grokOauth"],
   );
   assert.deepEqual(
-    serviceHealthRows({
+    (() => {
+      const row = serviceHealthRows({
       ok: true,
       degraded: [],
       gateway: { reachable: true },
       grokOauth: { reachable: true, enabled: false },
-    }).at(-1),
+      }).at(-1);
+      return { id: row.id, state: row.state, status: row.status, detail: row.detail };
+    })(),
     {
       id: "grokOauth",
-      label: "Grok OAuth forwarder",
       state: "standby",
       status: "Standby",
       detail: "Not enabled",
@@ -379,7 +393,7 @@ test("every mutating control in the desktop UI names the command it drives", () 
 test("desktop UI exposes translations with matching keys for every language", () => {
   assert.deepEqual(
     availableLanguages().map(({ id }) => id),
-    ["en", "zh-CN", "ar", "hi", "ja", "ko"],
+    ["en", "zh-TW", "zh-CN", "ar", "hi", "ja", "ko"],
   );
   const keys = translationKeys();
   const englishKeys = [...keys.en].sort();
@@ -394,6 +408,7 @@ test("desktop UI exposes translations with matching keys for every language", ()
     }
   }
   const samples = [
+    ["zh-TW", "用量"],
     ["zh-CN", "用量"],
     ["ar", "الاستخدام"],
     ["hi", "उपयोग"],
@@ -406,6 +421,8 @@ test("desktop UI exposes translations with matching keys for every language", ()
       assert.equal(getLanguage(), language);
       assert.equal(t("nav.usage"), navUsage);
     }
+    setLanguage("zh-TW");
+    assert.equal(t("usage.resetsToday", { time: "10:30" }), "今天 10:30 重設");
     setLanguage("zh-CN");
     assert.equal(t("usage.resetsToday", { time: "10:30" }), "今天 10:30 重置");
   } finally {

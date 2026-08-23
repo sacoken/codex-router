@@ -20,12 +20,14 @@ import {
   applyTranslations,
   availableLanguages,
   getLanguage,
+  getLocale,
   setLanguage,
   t,
 } from "./i18n.mjs";
 
 const invoke = window.__TAURI__?.core?.invoke;
-const view = new URLSearchParams(window.location.search).get("view") || "panel";
+const urlParams = new URLSearchParams(window.location.search);
+const view = urlParams.get("view") || "panel";
 
 // What the surface hosting this UI is willing to run, as the surface itself
 // reported it. Null until platform_info answers, and null forever in the tray
@@ -33,6 +35,10 @@ const view = new URLSearchParams(window.location.search).get("view") || "panel";
 // table: every check below is a no-op for them.
 let capabilities = null;
 
+const bootstrapLanguage = urlParams.get("lang");
+if (bootstrapLanguage && availableLanguages().some((language) => language.id === bootstrapLanguage)) {
+  setLanguage(bootstrapLanguage);
+}
 applyTranslations(document);
 
 if (view === "island") {
@@ -185,6 +191,7 @@ function startPanel() {
       setLanguage(elements.language.value);
       applyTranslations(document);
       renderPanel();
+      invoke?.("set_language", { language: elements.language.value }).catch(() => {});
     });
   }
 
@@ -297,6 +304,11 @@ function startPanel() {
     for (const result of results) {
       if ("value" in result) state[result.key] = result.value;
       else errors.push(result.error);
+    }
+    const storedLanguage = state.settings?.language;
+    if (storedLanguage && storedLanguage !== getLanguage()) {
+      setLanguage(storedLanguage);
+      applyTranslations(document);
     }
     // The control snapshot already contains the local-model, vision-bridge,
     // and presence views. Reusing them avoids starting separate Node processes
@@ -440,7 +452,8 @@ function startPanel() {
       ? compactTokens(series.reduce((total, point) => total + point.tokens, 0))
       : "\u2014";
     elements.usageRange.value = String(state.usageRange);
-    elements.usageRangeLabel.textContent = `${state.usageRange} days`;
+    const usageRangeWrap = elements.usageRangeLabel?.parentElement;
+    if (usageRangeWrap) usageRangeWrap.textContent = t("usage.lastNDays", { count: state.usageRange });
     renderChart(series, elements);
   }
 
@@ -457,15 +470,16 @@ function startPanel() {
       elements.usageOverview.innerHTML = "";
       return;
     }
+    const requestCount = (value) => t("usage.requestsCount", { count: Number(value || 0).toLocaleString(getLocale()) });
     const providerRows = providers.slice(0, 6).map((provider) => `<div class="usage-row">
-      <span><strong>${escapeHtml(provider.displayName || provider.id)}</strong><small>${Number(provider.requests || 0).toLocaleString()} requests</small></span>
+      <span><strong>${escapeHtml(provider.displayName || provider.id)}</strong><small>${requestCount(provider.requests)}</small></span>
       <strong>${compactTokens(provider.totalTokens)} tok</strong>
     </div>`).join("");
     const modelRows = models.map((model) => `<div class="usage-row">
-      <span><strong>${escapeHtml(model.displayName || model.slug)}</strong><small>${escapeHtml(model.provider)} · ${Number(model.requests || 0).toLocaleString()} requests</small></span>
+      <span><strong>${escapeHtml(model.displayName || model.slug)}</strong><small>${escapeHtml(model.provider)} · ${requestCount(model.requests)}</small></span>
       <strong>${compactTokens(model.totalTokens)} tok</strong>
     </div>`).join("");
-    elements.usageOverview.innerHTML = `${providerRows ? `<article class="usage-card"><header><strong>All usage</strong><small>router observed</small></header>${providerRows}</article>` : ""}${modelRows ? `<article class="usage-card"><header><strong>Tokens by model</strong><small>heaviest first</small></header>${modelRows}</article>` : ""}`;
+    elements.usageOverview.innerHTML = `${providerRows ? `<article class="usage-card"><header><strong>${escapeHtml(t("usage.allUsage"))}</strong><small>${escapeHtml(t("usage.routerObserved"))}</small></header>${providerRows}</article>` : ""}${modelRows ? `<article class="usage-card"><header><strong>${escapeHtml(t("usage.tokensByModel"))}</strong><small>${escapeHtml(t("usage.heaviestFirst"))}</small></header>${modelRows}</article>` : ""}`;
   }
 
   function renderStatusView() {
@@ -473,34 +487,42 @@ function startPanel() {
     const active = Array.isArray(activity.active) ? activity.active : [];
     const activeCount = Number(activity.activeCount ?? active.length) || 0;
     elements.statusSummary.textContent = activeCount
-      ? `${activeCount} request${activeCount === 1 ? "" : "s"} in flight · ${activity.state || "active"}`
-      : `Router ${state.health?.ok === false ? "offline" : "ready"} · nothing in flight`;
+      ? t("status.activeRequestsSummary", {
+          count: activeCount.toLocaleString(getLocale()),
+          state: activity.state === "generating" ? t("status.active") : activity.state || t("status.active"),
+        })
+      : t("status.routerStateSummary", { state: state.health?.ok === false ? t("status.offline") : t("status.ready") });
     renderServiceHealth();
-    elements.activeRequests.innerHTML = `<header><strong>Live requests</strong><small>${activeCount ? activeCount : "none"}</small></header>${active.length
+    elements.activeRequests.innerHTML = `<header><strong>${escapeHtml(t("status.requests"))}</strong><small>${activeCount ? activeCount.toLocaleString(getLocale()) : escapeHtml(t("status.none"))}</small></header>${active.length
       ? active.map((request) => {
           const started = Number(request.startedAt) || Date.now();
           const elapsed = Math.max(0, (Date.now() - (started > 1e12 ? started : started * 1000)) / 1000);
           const elapsedLabel = elapsed >= 60 ? `${Math.floor(elapsed / 60)}m ${String(Math.floor(elapsed % 60)).padStart(2, "0")}s` : `${elapsed.toFixed(1)}s`;
           const label = request.model ? String(request.model).split("/").at(-1) : request.provider || "request";
-          return `<div class="status-row"><span><strong>${escapeHtml(label)}</strong><small>${escapeHtml(request.provider || "router")}${request.isSubagent ? " · subagent" : ""}</small></span><strong>${elapsedLabel}</strong></div>`;
+          return `<div class="status-row"><span><strong>${escapeHtml(label)}</strong><small>${escapeHtml(request.provider || "router")}${request.isSubagent ? ` · ${escapeHtml(t("status.subagent"))}` : ""}</small></span><strong>${elapsedLabel}</strong></div>`;
         }).join("")
-      : '<p class="status-empty">Nothing in flight.</p>'}`;
+      : `<p class="status-empty">${escapeHtml(t("status.nothingInFlight"))}</p>`}`;
     const resets = buildQuotaCards(state).filter((card) => card.resetAt);
-    elements.quotaResets.innerHTML = `<header><strong>Quota resets</strong><small>${resets.length || "none"}</small></header>${resets.length
+    elements.quotaResets.innerHTML = `<header><strong>${escapeHtml(t("status.quotaResets"))}</strong><small>${resets.length ? resets.length.toLocaleString(getLocale()) : escapeHtml(t("status.none"))}</small></header>${resets.length
       ? resets.map((card) => `<div class="status-row"><span><strong>${escapeHtml(card.providerName)}</strong><small>${escapeHtml(card.label)}</small></span><strong>${escapeHtml(formatReset(card.resetAt))}</strong></div>`).join("")
-      : '<p class="status-empty">No reset times are available.</p>'}`;
+      : `<p class="status-empty">${escapeHtml(t("status.noResetTimes"))}</p>`}`;
   }
 
   function renderServiceHealth() {
     const rows = serviceHealthRows(state.health);
     const attention = rows.filter((row) => row.state === "offline" || row.state === "degraded").length;
     const summary = attention
-      ? `${attention} needs attention`
+      ? t("status.needsAttention", { count: attention })
       : rows.every((row) => row.state === "standby" || row.state === "ready")
-        ? "All clear"
-        : "Checking";
-    elements.serviceHealth.innerHTML = `<header><strong>Service health</strong><small>${summary}</small></header><div class="service-health-list">${rows
-      .map((row) => `<div class="service-health-row" data-state="${row.state}"><span class="service-health-title"><i class="service-health-dot" aria-hidden="true"></i><strong>${escapeHtml(row.label)}</strong></span><span class="service-health-pill">${escapeHtml(row.status)}</span><small class="service-health-detail">${escapeHtml(row.detail)}</small></div>`)
+        ? t("status.allClear")
+        : t("status.checking");
+    elements.serviceHealth.innerHTML = `<header><strong>${escapeHtml(t("status.serviceHealth"))}</strong><small>${escapeHtml(summary)}</small></header><div class="service-health-list">${rows
+      .map((row) => {
+        const detail = row.detailKey
+          ? t(row.detailKey, row.detailKey.includes("dependenciesAttention") ? { count: Number(row.detailCount || 0).toLocaleString(getLocale()) } : {})
+          : row.detail;
+        return `<div class="service-health-row" data-state="${row.state}"><span class="service-health-title"><i class="service-health-dot" aria-hidden="true"></i><strong>${escapeHtml(row.labelKey ? t(row.labelKey) : row.label)}</strong></span><span class="service-health-pill">${escapeHtml(row.statusKey ? t(row.statusKey) : row.status)}</span><small class="service-health-detail">${escapeHtml(detail)}</small></div>`;
+      })
       .join("")}</div>`;
   }
 
@@ -549,15 +571,15 @@ function startPanel() {
     elements.signedRoutingSwitch.checked = enabled;
     elements.signedRoutingSwitch.disabled = state.signedRoutingBusy || managed || state.loginFreeBusy;
     elements.signedRoutingSwitchLabel.title = managed
-      ? "Managed by the environment"
+      ? t("connections.managedByEnvironment")
       : enabled
-        ? "External requests use the router while native ChatGPT task history stays available."
-        : "Keep the native ChatGPT transport in place.";
+        ? t("connections.externalRequestsUseRouter")
+        : t("connections.keepNativeChatGPTTransport");
     elements.signedRoutingNote.textContent = managed
-      ? "Managed by the environment"
+      ? t("connections.managedByEnvironment")
       : enabled
-        ? "Native GPT plus external models · task history preserved"
-        : "Keep native ChatGPT transport and task history";
+        ? t("connections.nativePlusExternal")
+        : t("connections.keepNativeChatGPTTransport");
   }
 
   function renderPresence() {
@@ -565,8 +587,8 @@ function startPanel() {
     elements.presenceMode.value = mode;
     elements.presenceMode.disabled = state.presenceBusy;
     elements.presenceNote.textContent = mode === "follow-codex"
-      ? "Show while Codex or ChatGPT is running"
-      : "Keep the Windows tray visible";
+      ? t("connections.showWhileCodexRuns")
+      : t("connections.keepWindowsTrayVisible");
   }
 
   function renderMaintenance() {
@@ -574,13 +596,13 @@ function startPanel() {
     elements.maintenanceUpdate.disabled = busy;
     elements.maintenanceFix.disabled = busy;
     if (busy) {
-      elements.maintenanceStatus.textContent = state.maintenanceBusy === "fix" ? "Repairing…" : "Updating…";
-      elements.maintenanceNote.textContent = "The router is running maintenance; this may take a moment.";
+      elements.maintenanceStatus.textContent = state.maintenanceBusy === "fix" ? t("maintenance.repairing") : t("maintenance.updating");
+      elements.maintenanceNote.textContent = t("maintenance.running");
       return;
     }
     const result = state.maintenanceResult;
-    elements.maintenanceStatus.textContent = result?.ok ? "Verified" : result?.error ? "Maintenance failed" : "Router ready";
-    elements.maintenanceNote.textContent = result?.message || "Update the checkout and verify its installation.";
+    elements.maintenanceStatus.textContent = result?.ok ? t("maintenance.verified") : result?.error ? t("maintenance.failed") : t("maintenance.ready");
+    elements.maintenanceNote.textContent = result?.message || t("maintenance.updateNote");
   }
 
   function renderVisionBridge() {
@@ -588,45 +610,45 @@ function startPanel() {
     state.visionBridge = vision;
     const enabled = vision.enabled === true;
     const selected = vision.engine || "auto";
-    const selectedName = vision.resolvedEngineName || vision.resolvedEngine || "no engine";
-    elements.visionSummary.textContent = enabled ? `on · ${selectedName}` : "off";
+    const selectedName = vision.resolvedEngineName || vision.resolvedEngine || "—";
+    elements.visionSummary.textContent = enabled ? t("models.onWithEngine", { engine: selectedName }) : t("models.off");
     elements.visionNote.textContent = enabled
-      ? `Reading via ${selectedName}${vision.effort ? ` · ${vision.effort}` : ""}`
-      : "Off · text-only models refuse pasted images";
+      ? t("models.readingVia", { engine: selectedName, effort: vision.effort ? ` · ${vision.effort}` : "" })
+      : t("models.offNoImages");
     elements.visionSwitch.checked = enabled;
     elements.visionSwitch.disabled = state.visionBusy;
-    elements.visionSwitchLabel.title = enabled ? "Disable image transcription" : "Enable image transcription";
+    elements.visionSwitchLabel.title = enabled ? t("models.disableImageTranscription") : t("models.enableImageTranscription");
 
     const engineNames = new Map();
     for (const entry of [...(vision.paidEngines || []), ...(vision.nativeEngines || [])]) {
       if (entry?.slug) engineNames.set(entry.slug, entry.displayName || entry.slug);
     }
     const engineOptions = [
-      `<option value="auto"${selected === "auto" || !vision.engine ? " selected" : ""}>Auto · ${escapeHtml(selectedName)}</option>`,
+      `<option value="auto"${selected === "auto" || !vision.engine ? " selected" : ""}>${escapeHtml(t("models.autoWithEngine", { engine: selectedName }))}</option>`,
       ...[...(vision.availableEngines || [])]
         .filter((slug) => slug !== "local")
         .map((slug) => `<option value="${escapeHtml(slug)}"${slug === selected ? " selected" : ""}>${escapeHtml(engineNames.get(slug) || slug)}</option>`),
       ...(vision.localModels || []).some((model) => model.installed)
-        ? [`<option value="local"${selected === "local" ? " selected" : ""}>Local · ${escapeHtml(vision.local?.model || "Ollama")}</option>`]
+        ? [`<option value="local"${selected === "local" ? " selected" : ""}>${escapeHtml(t("models.localWithModel", { model: vision.local?.model || "Ollama" }))}</option>`]
         : [],
     ];
     elements.visionEngine.innerHTML = engineOptions.join("");
     elements.visionEngine.disabled = state.visionBusy || !enabled;
     const efforts = vision.availableEfforts || [];
     elements.visionEffort.innerHTML = efforts.length
-      ? [`<option value="default"${!vision.effort ? " selected" : ""}>Model default</option>`, ...efforts.map((effort) => `<option value="${escapeHtml(effort)}"${effort === vision.effort ? " selected" : ""}>${escapeHtml(effort)}</option>`)].join("")
-      : '<option value="default">Model default</option>';
+      ? [`<option value="default"${!vision.effort ? " selected" : ""}>${escapeHtml(t("models.modelDefault"))}</option>`, ...efforts.map((effort) => `<option value="${escapeHtml(effort)}"${effort === vision.effort ? " selected" : ""}>${escapeHtml(effort)}</option>`)].join("")
+      : `<option value="default">${escapeHtml(t("models.modelDefault"))}</option>`;
     elements.visionEffort.disabled = state.visionBusy || !enabled || !efforts.length;
 
     const models = vision.localModels || [];
     const operation = state.visionDownload;
     elements.visionLocalModels.innerHTML = models.length
-      ? `<div class="local-section-label"><span>Local image readers</span><small>${models.length} available</small></div>${models.map((model) => {
+      ? `<div class="local-section-label"><span>${escapeHtml(t("models.localImageReaders"))}</span><small>${escapeHtml(t("models.availableCount", { count: models.length.toLocaleString(getLocale()) }))}</small></div>${models.map((model) => {
           const installed = model.installed === true;
           const active = operation?.tag === model.tag && operation?.status === "downloading";
-          const action = active ? `<button class="mini-button" type="button" disabled>${Number(operation.percent || 0)}%</button>` : installed ? `<button class="mini-button" type="button" data-command="use_local_vision_model" data-vision-action="use" data-model="${escapeHtml(model.tag)}">${vision.engine === "local" && vision.local?.model === model.tag ? "Using" : "Use"}</button>` : `<button class="mini-button" type="button" data-command="pull_vision_model" data-vision-action="download" data-model="${escapeHtml(model.tag)}"${state.visionBusy ? " disabled" : ""}>Download</button>`;
-          const tests = installed ? `<button class="text-button" type="button" data-command="benchmark_vision_model" data-vision-action="benchmark" data-model="${escapeHtml(model.tag)}"${state.localBenchmarkBusy ? " disabled" : ""}>Test</button>` : "";
-          return `<div class="vision-model-row"><span><strong>${escapeHtml(model.label || model.tag)}</strong><small>${escapeHtml(model.tag)} · ${escapeHtml(model.accuracy || "unmeasured")}</small></span><span>${tests}${action}</span></div>`;
+          const action = active ? `<button class="mini-button" type="button" disabled>${Number(operation.percent || 0)}%</button>` : installed ? `<button class="mini-button" type="button" data-command="use_local_vision_model" data-vision-action="use" data-model="${escapeHtml(model.tag)}">${vision.engine === "local" && vision.local?.model === model.tag ? escapeHtml(t("models.using")) : escapeHtml(t("models.use"))}</button>` : `<button class="mini-button" type="button" data-command="pull_vision_model" data-vision-action="download" data-model="${escapeHtml(model.tag)}"${state.visionBusy ? " disabled" : ""}>${escapeHtml(t("models.download"))}</button>`;
+          const tests = installed ? `<button class="text-button" type="button" data-command="benchmark_vision_model" data-vision-action="benchmark" data-model="${escapeHtml(model.tag)}"${state.localBenchmarkBusy ? " disabled" : ""}>${escapeHtml(t("models.test"))}</button>` : "";
+          return `<div class="vision-model-row"><span><strong>${escapeHtml(model.label || model.tag)}</strong><small>${escapeHtml(model.tag)} · ${escapeHtml(model.accuracy || t("models.accuracyUnmeasured"))}</small></span><span>${tests}${action}</span></div>`;
         }).join("")}`
       : "";
   }
@@ -764,7 +786,7 @@ function startPanel() {
           (group) => `<details class="model-provider-group" open>
             <summary><span>${escapeHtml(providerLabel(group.provider))}</span><span class="model-provider-count">${escapeHtml(groupSummary(group))}</span></summary>
             <div class="model-provider-toolbar">
-              ${setting === "picker" && group.items.every((model) => model.native === true && model.nativeClientManaged !== false) ? `<span class="model-provider-note">Managed by Codex</span>` : `<button class="text-button" type="button" data-command="${groupCommand}" data-provider-setting="${setting}" data-provider="${escapeHtml(group.provider)}" data-enabled="true">${onLabel}</button>
+              ${setting === "picker" && group.items.every((model) => model.native === true && model.nativeClientManaged !== false) ? `<span class="model-provider-note">${escapeHtml(t("models.managedByCodex"))}</span>` : `<button class="text-button" type="button" data-command="${groupCommand}" data-provider-setting="${setting}" data-provider="${escapeHtml(group.provider)}" data-enabled="true">${onLabel}</button>
               <button class="text-button" type="button" data-command="${groupCommand}" data-provider-setting="${setting}" data-provider="${escapeHtml(group.provider)}" data-enabled="false">${offLabel}</button>`}
             </div>
             <div class="model-settings-list">${group.items.map(rowMarkup).join("")}</div>
@@ -806,17 +828,17 @@ function startPanel() {
           : certified
             ? t("models.provenV2")
             : knownV1
-              ? "v1 only"
+              ? t("models.v1Only")
             : checking
               ? t("status.working")
             : candidate
-              ? "Certification candidate"
+              ? t("models.certificationCandidate")
             : proof?.status === "failed"
               ? `${t("status.error")}: ${proof.reason || t("models.untested")}`
               : t("models.untested");
         return `<label class="model-setting-row">
           <span><strong>${escapeHtml(model.displayName)}</strong><small>${escapeHtml(badge)}</small></span>
-          <span class="provider-check"><input type="checkbox" data-command="set_subagent_model" data-subagent="${escapeHtml(model.slug)}" aria-label="${escapeHtml(certified ? t("models.useModelAria", { model: model.displayName }) : knownV1 ? `${model.displayName} is certified v1` : `Test ${model.displayName} for v2 compatibility`)}"${certified ? (checked ? " checked" : "") : (testActive ? " checked" : "")}${state.modelSettingsBusy || model.visible === false || knownV1 || candidate ? " disabled" : ""}></span>
+          <span class="provider-check"><input type="checkbox" data-command="set_subagent_model" data-subagent="${escapeHtml(model.slug)}" aria-label="${escapeHtml(certified ? t("models.useModelAria", { model: model.displayName }) : knownV1 ? t("models.certifiedV1Aria", { model: model.displayName }) : t("models.testV2CompatibilityAria", { model: model.displayName }))}"${certified ? (checked ? " checked" : "") : (testActive ? " checked" : "")}${state.modelSettingsBusy || model.visible === false || knownV1 || candidate ? " disabled" : ""}></span>
         </label>`;
       };
 
@@ -929,12 +951,12 @@ function startPanel() {
       const publicationWarning = !failed && !cancelled && Boolean(download.catalogError || download.restartError);
       const percent = Math.max(0, Math.min(100, Number(download.percent) || 0));
       const title = failed
-        ? (removal ? "Local model removal failed" : t("status.localModelInstallFailed"))
-        : cancelled
-          ? (removal ? "Local model removal cancelled" : "Local model download cancelled")
+        ? (removal ? t("models.localRemovalFailed") : t("status.localModelInstallFailed"))
+      : cancelled
+          ? (removal ? t("models.localRemovalCancelled") : t("models.localDownloadCancelled"))
           : running
-            ? (removal ? "Uninstalling local model" : "Installing local model")
-            : removal ? "Local model removed" : t("status.localModelReady");
+            ? (removal ? t("models.uninstallingLocalModel") : t("models.installingLocalModel"))
+            : removal ? t("models.localModelRemovedStatus") : t("status.localModelReady");
       const statusClass = failed
         ? " is-error"
         : cancelled
@@ -945,14 +967,14 @@ function startPanel() {
               ? " is-running"
               : " is-ready";
       const cancelButton = running && download.tag
-        ? `<button class="mini-button danger" type="button" data-command="cancel_local_model" data-local-action="cancel-operation" data-model="${escapeHtml(download.tag)}"${state.localCancelBusy ? " disabled" : ""}>Cancel</button>`
+        ? `<button class="mini-button danger" type="button" data-command="cancel_local_model" data-local-action="cancel-operation" data-model="${escapeHtml(download.tag)}"${state.localCancelBusy ? " disabled" : ""}>${escapeHtml(t("actions.cancel"))}</button>`
         : "";
       // A terminal download failure/cancellation must be recoverable from the
       // status card itself.  The install form is still available, but a
       // one-click retry makes an interrupted pull obvious and avoids making
       // the operator retype a long Ollama tag or URL.
       const retryButton = !running && !removal && (failed || cancelled) && download.tag
-        ? `<button class="mini-button" type="button" data-command="install_local_model" data-local-action="retry-operation" data-model="${escapeHtml(download.tag)}"${state.localModelBusy || state.localCancelBusy ? " disabled" : ""}>Retry</button>`
+        ? `<button class="mini-button" type="button" data-command="install_local_model" data-local-action="retry-operation" data-model="${escapeHtml(download.tag)}"${state.localModelBusy || state.localCancelBusy ? " disabled" : ""}>${escapeHtml(t("actions.retry"))}</button>`
         : "";
       elements.localDownloadStatus.innerHTML = `<div class="download-status${statusClass}">
         <div class="download-status-head"><span class="operation-pulse" aria-hidden="true"></span><strong>${title}</strong><span>${failed || cancelled || removal ? "" : `${percent}%`}</span>${cancelButton}${retryButton}</div>
@@ -974,7 +996,7 @@ function startPanel() {
     const availablePicks = Array.isArray(local.available) ? local.available : [];
     const picks = state.localQuickPicksExpanded ? availablePicks : availablePicks.slice(0, 4);
     const morePicks = availablePicks.length > 4
-      ? `<button type="button" class="text-button quick-picks-toggle" data-local-action="toggle-picks">${state.localQuickPicksExpanded ? "Show fewer quick picks" : `Show ${availablePicks.length - 4} more quick picks`}</button>`
+      ? `<button type="button" class="text-button quick-picks-toggle" data-local-action="toggle-picks">${state.localQuickPicksExpanded ? escapeHtml(t("models.showFewerQuickPicks")) : escapeHtml(t("models.showMoreQuickPicks", { count: availablePicks.length - 4 }))}</button>`
       : "";
     elements.localQuickPicks.innerHTML = picks.length
       ? `<div class="local-section-label"><span>${escapeHtml(t("models.quickPicks"))}</span><small>${escapeHtml(t("models.recommendedForMachine"))}</small></div>${picks
@@ -991,8 +1013,8 @@ function startPanel() {
     const runtime = local.runtime || {};
     const machine = local.machine ? `<small class="muted-line">${escapeHtml(local.machine)}</small>` : "";
     elements.localRuntimeActions.innerHTML = runtime.installed
-      ? `<div><small>Ollama ${escapeHtml(runtime.version || "installed")} · headless server ${runtime.running ? "running" : "not started"}</small>${runtime.modelsPath ? `<small class="muted-line">Models: ${escapeHtml(runtime.modelsPath)}</small>` : ""}${machine}</div><button class="text-button" type="button" data-command="update_local_ollama" data-local-runtime-action="update"${state.maintenanceBusy || state.localModelBusy ? " disabled" : ""}>Update Ollama</button>`
-      : `<small>Ollama is not installed. Installing a model can set it up with explicit consent.</small>`;
+      ? `<div><small>Ollama ${escapeHtml(runtime.version || t("local.ollamaInstalled"))} · ${escapeHtml(t("local.headlessServer"))} ${runtime.running ? escapeHtml(t("local.running")) : escapeHtml(t("local.notStarted"))}</small>${runtime.modelsPath ? `<small class="muted-line">${escapeHtml(t("local.modelsPath"))} ${escapeHtml(runtime.modelsPath)}</small>` : ""}${machine}</div><button class="text-button" type="button" data-command="update_local_ollama" data-local-runtime-action="update"${state.maintenanceBusy || state.localModelBusy ? " disabled" : ""}>${escapeHtml(t("local.updateOllama"))}</button>`
+      : `<small>${escapeHtml(t("local.ollamaMissing"))}</small>`;
   }
 
   // LM Studio owns loading and unloading its models, so this section is a
@@ -1008,13 +1030,13 @@ function startPanel() {
     const name = lmstudio.displayName || "LM Studio";
     const header = `<div class="local-section-label"><span>${escapeHtml(name)}</span><small>${
       lmstudio.reachable
-        ? "Local server running · models are managed in LM Studio"
-        : "Not running · start LM Studio's local server to list its models"
+        ? escapeHtml(t("local.serverRunning"))
+        : escapeHtml(t("local.serverNotRunning"))
     }</small></div>`;
     const models = Array.isArray(lmstudio.models) ? lmstudio.models : [];
     if (!models.length) {
       elements.lmstudioSection.innerHTML = lmstudio.reachable
-        ? `${header}<div class="empty-state local-empty">No models are loaded in LM Studio yet.</div>`
+        ? `${header}<div class="empty-state local-empty">${escapeHtml(t("local.noModelsLoaded"))}</div>`
         : header;
       return;
     }
@@ -1023,10 +1045,10 @@ function startPanel() {
       .map((model) => {
         const isBusy = state.lmstudioBusy === model.id;
         const detail = model.served
-          ? model.enabled ? "In the picker" : "Served · unchecked"
-          : "Checked but not currently served";
+          ? model.enabled ? t("local.inPicker") : t("local.servedUnchecked")
+          : t("local.checkedNotServed");
         return `<article class="local-model-row${isBusy ? " is-busy" : ""}">
-          <label class="provider-check"><input type="checkbox" data-command="set_lmstudio_model_enabled" data-lmstudio-toggle="${escapeHtml(model.id)}" aria-label="Offer ${escapeHtml(model.id)} in the model picker"${model.enabled ? " checked" : ""}${rowBusy ? " disabled" : ""}></label>
+          <label class="provider-check"><input type="checkbox" data-command="set_lmstudio_model_enabled" data-lmstudio-toggle="${escapeHtml(model.id)}" aria-label="${escapeHtml(t("local.offerInPicker", { model: model.id }))}"${model.enabled ? " checked" : ""}${rowBusy ? " disabled" : ""}></label>
           <div><strong>${escapeHtml(model.id)}</strong><small>${escapeHtml(detail)}</small></div>
         </article>`;
       })
@@ -1112,32 +1134,37 @@ function startPanel() {
       const rightName = familyNames.get(right[0]) || right[0];
       return leftName.localeCompare(rightName);
     });
-    const detail = query
-      ? `${visible.length} of ${explore.length} tags · ${sortedGroups.length} families`
-      : `${explore.length} tags · ${sortedGroups.length} families`;
+    const detail = t("local.tagsAndFamilies", {
+      tags: query ? `${visible.length}/${explore.length}` : explore.length,
+      families: sortedGroups.length,
+    });
 
     elements.localCatalog.innerHTML = `
       <div class="local-catalog-heading">
-        <div class="local-section-label"><span>Discover Ollama</span><small>${escapeHtml(detail)}</small></div>
-        <p>Official catalog snapshot. Search by family, tag, variant, or capability; arbitrary Ollama tags and URLs still work above.</p>
-        <button type="button" class="text-button" data-local-catalog-action="variant-help">${state.localVariantHelpExpanded ? "Hide tag guide" : "What do these tags mean?"}</button>
-        ${state.localVariantHelpExpanded ? '<p class="local-catalog-help">Size tags choose model scale; Q4/Q8/BF16 are weight precision; MLX/NVFP4 are hardware-oriented builds; cloud tags run remotely. Codex compatibility is checked after a pull.</p>' : ""}
+        <div class="local-section-label"><span>${escapeHtml(t("local.discoverOllama"))}</span><small>${escapeHtml(detail)}</small></div>
+        <p>${escapeHtml(t("local.catalogSnapshot"))}</p>
+        <button type="button" class="text-button" data-local-catalog-action="variant-help">${state.localVariantHelpExpanded ? escapeHtml(t("local.hideTagGuide")) : escapeHtml(t("local.whatDoTagsMean"))}</button>
+        ${state.localVariantHelpExpanded ? `<p class="local-catalog-help">${escapeHtml(t("local.tagGuide"))}</p>` : ""}
       </div>
       <div class="local-catalog-search">
-        <input type="search" data-local-catalog-filter value="${escapeHtml(state.localCatalogFilter)}" placeholder="Search all Ollama tags" autocomplete="off" spellcheck="false" aria-label="Search all Ollama tags" />
-        ${query ? '<button class="text-button" type="button" data-local-catalog-clear>Clear</button>' : ""}
+        <input type="search" data-local-catalog-filter value="${escapeHtml(state.localCatalogFilter)}" placeholder="${escapeHtml(t("local.searchAllOllamaTags"))}" autocomplete="off" spellcheck="false" aria-label="${escapeHtml(t("local.searchAllOllamaTags"))}" />
+        ${query ? `<button class="text-button" type="button" data-local-catalog-clear>${escapeHtml(t("local.clear"))}</button>` : ""}
       </div>
       ${sortedGroups.length ? sortedGroups.map(([family, models]) => {
         const familyName = familyNames.get(family) || family;
         const rows = [...models].sort(compareLocalCatalogModels);
-        const fitCount = rows.filter((model) => localCatalogFit(model) === "fits" || localCatalogFit(model) === "tight").length;
+        const fitCount = rows.filter((model) => localCatalogFit(model) === t("models.fits") || localCatalogFit(model) === t("models.tight")).length;
         const cloudCount = rows.filter((model) => model.downloadable === false).length;
-        const familyDetail = `${rows.length} tag${rows.length === 1 ? "" : "s"}${fitCount ? ` · ${fitCount} local` : ""}${cloudCount ? ` · ${cloudCount} cloud` : ""}`;
+        const familyDetail = [
+          t("local.familyTagCount", { count: rows.length }),
+          fitCount ? t("local.familyLocalCount", { count: fitCount }) : "",
+          cloudCount ? t("local.familyCloudCount", { count: cloudCount }) : "",
+        ].filter(Boolean).join(" · ");
         return `<details class="local-catalog-family" open>
           <summary><span><strong>${escapeHtml(familyName)}</strong><small>${escapeHtml(familyDetail)}</small></span><span class="accordion-chevron" aria-hidden="true"></span></summary>
           <div class="local-catalog-list">${rows.map((model) => localCatalogRow(model, installed, installBusy)).join("")}</div>
         </details>`;
-      }).join("") : `<div class="empty-state local-empty">No Ollama tags match “${escapeHtml(state.localCatalogFilter)}”.</div>`}
+      }).join("") : `<div class="empty-state local-empty">${escapeHtml(t("local.noTagsMatch", { query: state.localCatalogFilter }))}</div>`}
     `;
     const clear = elements.localCatalog.querySelector("[data-local-catalog-clear]");
     clear?.addEventListener("click", () => {
@@ -1155,39 +1182,44 @@ function startPanel() {
     const downloadable = model.downloadable !== false;
     const tooLarge = downloadable && (model.fit === "too-large" || model.diskFit === "too-large");
     const fit = localCatalogFit(model);
-    const fitClass = fit === "won’t fit" ? " is-danger" : fit === "tight" ? " is-warning" : "";
+    const fitClass = fit === t("models.wontFit") ? " is-danger" : fit === t("models.tight") ? " is-warning" : "";
     const capabilities = Array.isArray(model.researchCapabilities) && model.researchCapabilities.length
       ? ` · ${model.researchCapabilities.join(" · ")}`
       : "";
     const title = model.displayName && model.displayName !== tag ? model.displayName : tag;
     let action;
     if (!downloadable) {
-      action = '<span class="local-catalog-cloud">Cloud only</span>';
+      action = `<span class="local-catalog-cloud">${escapeHtml(t("models.cloudOnly"))}</span>`;
     } else if (installed.has(tag)) {
-      action = '<span class="local-catalog-installed">Installed</span>';
+      action = `<span class="local-catalog-installed">${escapeHtml(t("local.installed"))}</span>`;
     } else {
-      action = `<button class="mini-button${tooLarge ? " danger" : ""}" type="button" data-command="install_local_model" data-local-action="install" data-model="${escapeHtml(tag)}"${installBusy ? " disabled" : ""}>${tooLarge ? "Anyway" : "Download"}</button>`;
+      action = `<button class="mini-button${tooLarge ? " danger" : ""}" type="button" data-command="install_local_model" data-local-action="install" data-model="${escapeHtml(tag)}"${installBusy ? " disabled" : ""}>${tooLarge ? escapeHtml(t("local.anyway")) : escapeHtml(t("models.download"))}</button>`;
     }
     return `<article class="local-catalog-row${tooLarge ? " is-too-large" : ""}">
       <div class="local-catalog-copy"><strong>${escapeHtml(title)}</strong><small>${escapeHtml(tag)}${escapeHtml(capabilities)}</small></div>
-      <span class="local-catalog-size">${downloadable ? `${(Number(model.sizeGb) || 0).toFixed(1)} GB` : "cloud"}</span>
+      <span class="local-catalog-size">${downloadable ? `${(Number(model.sizeGb) || 0).toFixed(1)} GB` : escapeHtml(t("local.cloud"))}</span>
       <span class="local-catalog-fit${fitClass}">${escapeHtml(fit)}</span>
       ${action}
     </article>`;
   }
 
   function localCatalogFit(model) {
-    if (model.downloadable === false) return "cloud only";
-    if (model.fit === "too-large" || model.diskFit === "too-large") return "won’t fit";
-    if (model.fit === "tight" || model.diskFit === "tight") return "tight";
-    return model.fit || model.diskFit || "untested";
+    if (model.downloadable === false) return t("models.cloudOnly");
+    if (model.fit === "too-large" || model.diskFit === "too-large") return t("models.wontFit");
+    if (model.fit === "tight" || model.diskFit === "tight") return t("models.tight");
+    return model.fit || model.diskFit || t("models.untestedFit");
   }
 
   function compareLocalCatalogModels(left, right) {
     const leftLatest = left.variant === "latest";
     const rightLatest = right.variant === "latest";
     if (leftLatest !== rightLatest) return leftLatest ? -1 : 1;
-    const fitRank = { fits: 0, tight: 1, "cloud only": 2, "won’t fit": 3 };
+    const fitRank = {
+      [t("models.fits")]: 0,
+      [t("models.tight")]: 1,
+      [t("models.cloudOnly")]: 2,
+      [t("models.wontFit")]: 3,
+    };
     const leftRank = fitRank[localCatalogFit(left)] ?? 4;
     const rightRank = fitRank[localCatalogFit(right)] ?? 4;
     if (leftRank !== rightRank) return leftRank - rightRank;
@@ -1207,9 +1239,9 @@ function startPanel() {
       model.agent === "agent" ? t("models.worksInCodex") : model.tools ? t("models.chatUntested") : t("models.noToolCalling"),
       Number.isFinite(speed) ? `${speed.toFixed(1)} tok/s` : t("models.speedUnmeasured"),
     ].join(" · ");
-    const speedAction = `<button class="text-button" type="button" data-command="local_model_speed" data-local-action="measure-speed" data-model="${escapeHtml(model.tag)}"${state.localBenchmarkBusy ? " disabled" : ""}>Speed</button>`;
+    const speedAction = `<button class="text-button" type="button" data-command="local_model_speed" data-local-action="measure-speed" data-model="${escapeHtml(model.tag)}"${state.localBenchmarkBusy ? " disabled" : ""}>${escapeHtml(t("models.speed"))}</button>`;
     const visionActions = model.vision
-      ? `<button class="text-button" type="button" data-command="benchmark_vision_model" data-local-action="test-image" data-model="${escapeHtml(model.tag)}"${state.localBenchmarkBusy ? " disabled" : ""}>Test image</button><button class="text-button" type="button" data-command="use_local_vision_model" data-local-action="use-image" data-model="${escapeHtml(model.tag)}"${state.visionBusy ? " disabled" : ""}>${state.visionBridge?.engine === "local" && state.visionBridge?.local?.model === model.tag ? "Using image" : "Use image"}</button>`
+      ? `<button class="text-button" type="button" data-command="benchmark_vision_model" data-local-action="test-image" data-model="${escapeHtml(model.tag)}"${state.localBenchmarkBusy ? " disabled" : ""}>${escapeHtml(t("models.testImage"))}</button><button class="text-button" type="button" data-command="use_local_vision_model" data-local-action="use-image" data-model="${escapeHtml(model.tag)}"${state.visionBusy ? " disabled" : ""}>${state.visionBridge?.engine === "local" && state.visionBridge?.local?.model === model.tag ? escapeHtml(t("models.usingImage")) : escapeHtml(t("models.useImage"))}</button>`
       : "";
     return `<article class="local-model-row${isBusy ? " is-busy" : ""}">
       <label class="provider-check"><input type="checkbox" data-command="set_local_model_enabled" data-local-toggle="${escapeHtml(model.tag)}" aria-label="${escapeHtml(t("models.enableLocalAria", { model: model.tag }))}"${model.enabled ? " checked" : ""}${busy || model.tools !== true ? " disabled" : ""}></label>
@@ -1258,7 +1290,7 @@ function startPanel() {
       return;
     }
     if (!model) {
-      showToast("The local model tag is missing. Refresh the panel and try again.", true);
+      showToast(t("models.localTagMissing"), true);
       return;
     }
     if (button.dataset.localAction === "install") {
@@ -1343,12 +1375,12 @@ function startPanel() {
   async function startLocalInstall(model, { force = false } = {}) {
     model = String(model || "").trim();
     if (!model) {
-      showToast("The local model tag is missing. Refresh the panel and try again.", true);
+      showToast(t("models.localTagMissing"), true);
       return;
     }
     const active = state.localModels?.download;
     if (state.localModelBusy || state.localCancelBusy || ["downloading", "uninstalling"].includes(active?.status)) {
-      showToast(active?.tag === model ? `${model} is already in progress.` : "Another local model operation is already in progress.", true);
+      showToast(active?.tag === model ? t("models.operationInProgress", { model }) : t("models.anotherOperationInProgress"), true);
       return;
     }
     state.localRemoveArmed = null;
@@ -1409,7 +1441,7 @@ function startPanel() {
       if (download?.status === "done") {
         showToast(kind === "uninstall" ? t("models.localModelRemoved", { model: download.tag || model }) : t("models.localModelReadyRestart", { model: download.tag || model }));
       } else if (download?.status === "cancelled") {
-        showToast(kind === "uninstall" ? `${download.tag || model} removal cancelled.` : `${download.tag || model} download cancelled.`);
+        showToast(kind === "uninstall" ? t("models.removalCancelled", { model: download.tag || model }) : t("models.downloadCancelled", { model: download.tag || model }));
       } else if (download?.status === "error") {
         showToast(download.error || t("models.localModelInstallError"), true);
       }
@@ -1428,7 +1460,7 @@ function startPanel() {
     try {
       const result = await call("cancel_local_model", { model });
       state.localModels = await call("local_models");
-      showToast(result?.cancelled ? `${model} operation cancelled.` : "No local model operation is running.");
+      showToast(result?.cancelled ? t("models.operationCancelled", { model }) : t("models.noOperationRunning"));
     } catch (error) {
       showToast(errorMessage(error), true);
     } finally {
@@ -1446,7 +1478,7 @@ function startPanel() {
     renderLocalModels();
     try {
       await call("update_local_ollama");
-      showToast("Ollama updated. Its headless server will be reused for local models.");
+      showToast(t("local.ollamaUpdated"));
       await refreshPanel({ quiet: true });
     } catch (error) {
       showToast(errorMessage(error), true);
@@ -1463,7 +1495,7 @@ function startPanel() {
     renderLocalModels();
     try {
       await call("local_model_speed", { model });
-      showToast(`${model} speed measured.`);
+      showToast(t("models.speedMeasured", { model }));
       await refreshPanel({ quiet: true });
     } catch (error) {
       showToast(errorMessage(error), true);
@@ -1480,7 +1512,7 @@ function startPanel() {
     renderVisionBridge();
     try {
       await call("benchmark_vision_model", { model });
-      showToast(`${model} image reading tested.`);
+      showToast(t("models.imageReadingTested", { model }));
       await refreshPanel({ quiet: true });
     } catch (error) {
       showToast(errorMessage(error), true);
@@ -1498,7 +1530,7 @@ function startPanel() {
     renderLocalModels();
     try {
       await call("use_local_vision_model", { model });
-      showToast(`${model} is now the local image reader.`);
+      showToast(t("models.localImageReaderSelected", { model }));
       await refreshPanel({ quiet: true });
     } catch (error) {
       showToast(errorMessage(error), true);
@@ -1555,7 +1587,7 @@ function startPanel() {
         showToast(`${model} downloaded for image reading.`);
         await refreshPanel({ quiet: true });
       } else if (status?.status === "error") {
-        showToast(status.error || "The vision model download failed.", true);
+        showToast(status.error || t("models.visionDownloadFailed"), true);
       }
       renderVisionBridge();
     } catch {
@@ -1789,8 +1821,8 @@ function startPanel() {
       state.snapshot = await call("set_signed_routing", { enabled });
       showToast(
         enabled
-          ? "Signed routing enabled. Restart Codex to apply the native-plus-router transport."
-          : "Signed routing disabled. Restart Codex to restore the native transport.",
+          ? t("connections.signedRoutingEnabled")
+          : t("connections.signedRoutingDisabled"),
       );
       await refreshPanel({ quiet: true });
     } catch (error) {
@@ -1809,7 +1841,7 @@ function startPanel() {
     renderPresence();
     try {
       state.presence = await call("set_presence_mode", { mode });
-      showToast(mode === "follow-codex" ? "Tray will follow Codex presence." : "Tray will stay visible.");
+      showToast(mode === "follow-codex" ? t("connections.trayFollowCodex") : t("connections.trayStayVisible"));
     } catch (error) {
       elements.presenceMode.value = previous;
       showToast(errorMessage(error), true);
@@ -1825,7 +1857,7 @@ function startPanel() {
     renderVisionBridge();
     try {
       state.visionBridge = await call("set_vision_bridge", { enabled });
-      showToast(enabled ? "Vision bridge enabled for pasted images." : "Vision bridge disabled.");
+      showToast(enabled ? t("models.visionBridgeEnabled") : t("models.visionBridgeDisabled"));
       await refreshPanel({ quiet: true });
     } catch (error) {
       elements.visionSwitch.checked = !enabled;
@@ -1843,7 +1875,7 @@ function startPanel() {
     renderVisionBridge();
     try {
       state.visionBridge = await call("set_vision_engine", { engine, effort });
-      showToast(engine === "local" ? "Local vision model selected." : "Vision engine selected.");
+      showToast(engine === "local" ? t("models.localVisionModelSelected") : t("models.visionEngineSelected"));
       await refreshPanel({ quiet: true });
     } catch (error) {
       showToast(errorMessage(error), true);
@@ -1859,7 +1891,7 @@ function startPanel() {
     renderVisionBridge();
     try {
       state.visionBridge = await call("set_vision_effort", { effort });
-      showToast(effort === "default" ? "Vision effort reset to model default." : `Vision effort set to ${effort}.`);
+      showToast(effort === "default" ? t("models.visionEffortReset") : t("models.visionEffortSet", { effort }));
       await refreshPanel({ quiet: true });
     } catch (error) {
       showToast(errorMessage(error), true);
@@ -1881,8 +1913,8 @@ function startPanel() {
         message: kind === "fix"
           ? "Repair completed and the installation was verified."
           : result?.restartRequired
-            ? "Updated and verified. Restart Codex to load the refreshed catalog."
-            : "Updated and verified.",
+            ? t("maintenance.updatedRestart")
+            : t("maintenance.updated"),
       };
       showToast(state.maintenanceResult.message);
       await refreshPanel({ quiet: true });
@@ -2125,12 +2157,10 @@ function activityLabels() {
 
 function localizeProviderPlan(note) {
   const value = String(note || "");
-  if (getLanguage() === "zh-CN") {
-    if (value.includes("Needs the Command Code Provider plan")) return "需要 Command Code Provider 方案。";
-    if (value.includes("Requires Copilot access")) return "需要 Copilot 访问权限。连接后，请运行 ./bin/curate-models github-copilot。";
-    if (value.includes("Requires an active ClinePass subscription")) return "需要有效的 ClinePass 订阅。";
-    if (value.includes("Runs on this machine")) return "在此设备上运行。使用这些模型前请先启动 Ollama。";
-  }
+  if (value.includes("Needs the Command Code Provider plan")) return t("connections.planCommandCode");
+  if (value.includes("Requires Copilot access")) return t("connections.planCopilot");
+  if (value.includes("Requires an active ClinePass subscription")) return t("connections.planClinePass");
+  if (value.includes("Runs on this machine")) return t("connections.runsOnThisMachine");
   return value;
 }
 

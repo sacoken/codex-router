@@ -13,6 +13,7 @@ const {
   shell,
 } = require("electron");
 const { execFile } = require("node:child_process");
+const { readFileSync, writeFileSync } = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
 const { promisify } = require("node:util");
@@ -59,7 +60,39 @@ let serviceIntent = "unknown";
 // islandEnabled starts true, as it does in the Tauri shell's Settings::default.
 // Starting it false meant the switch read "off" on first launch and the pill
 // never appeared until someone found and flipped it.
+function companionSettingsPath() {
+  return path.join(app.getPath("userData"), "companion-settings.json");
+}
+
+// The webview's file:// origin does not reliably persist localStorage across
+// launches. Language is a shell preference, so keep it beside the other
+// companion settings instead of putting it in Codex's configuration.
+function readCompanionSettings() {
+  try {
+    const value = JSON.parse(readFileSync(companionSettingsPath(), "utf8"));
+    return {
+      islandEnabled: value.islandEnabled !== false,
+      islandExpanded: value.islandExpanded === true,
+      language: typeof value.language === "string" ? value.language : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
 const settings = { islandEnabled: true, islandExpanded: false };
+
+function loadCompanionSettings() {
+  Object.assign(settings, readCompanionSettings());
+}
+
+function saveCompanionSettings() {
+  try {
+    writeFileSync(companionSettingsPath(), `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+  } catch {
+    // A read-only profile still leaves the current session working.
+  }
+}
 const HOST_PROCESS_NAMES = new Set(["chatgpt.exe", "codex.exe", "codex-desktop.exe"]);
 const PRESENCE_POLL_MS = 5_000;
 const PRESENCE_ABSENCE_GRACE_MS = 15_000;
@@ -103,6 +136,15 @@ async function handleInvoke(command, args) {
   if (command === "router_health") return routerHealth();
   if (command === "platform_info") return platformInfo();
   if (command === "desktop_settings") return { ...settings };
+  if (command === "set_language") {
+    const language = String(args.language || "");
+    if (!/^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$/i.test(language)) {
+      throw new Error(`Unsupported interface language: ${language}`);
+    }
+    settings.language = language;
+    saveCompanionSettings();
+    return { ...settings };
+  }
   if (command === "set_island_enabled") {
     settings.islandEnabled = Boolean(args.enabled);
     applyIslandVisibility();
@@ -195,6 +237,8 @@ function applyPresenceVisibility(visible) {
       // the app bridge and the next poll retries once a desktop is available.
     }
   }
+  // Follow mode brings the full panel back with Codex, not only the tray and pill.
+  if (presenceMode === "follow-codex") showPanel();
   applyIslandVisibility();
 }
 
@@ -216,9 +260,11 @@ async function setPresenceService(action) {
 async function reconcilePresence() {
   if (process.platform !== "win32") return;
   let mode = presenceMode;
+  let effectiveMode = "always";
   try {
     const snapshot = await (await loadBridge()).runDesktopCommand("presence_status", {}, { root });
     mode = snapshot?.mode === "follow-codex" ? "follow-codex" : "always";
+    effectiveMode = snapshot?.effectiveMode === "follow-codex" ? "follow-codex" : "always";
   } catch {
     mode = "always";
   }
@@ -248,11 +294,19 @@ async function reconcilePresence() {
 
   // Hide the surfaces immediately, but wait before stopping the endpoint so a
   // quick Codex restart and any final in-flight request are not interrupted.
+  if (effectiveMode === "always") {
+    if (presenceStopTimer) {
+      clearTimeout(presenceStopTimer);
+      presenceStopTimer = null;
+    }
+    serviceIntent = "unknown";
+    return;
+  }
   if (!presenceStopTimer) {
     presenceStopTimer = setTimeout(async () => {
       presenceStopTimer = null;
       const stillRunning = await hostApplicationRunning();
-      if (stillRunning || presenceMode !== "follow-codex") return;
+      if (stillRunning || presenceMode !== "follow-codex" || effectiveMode === "always") return;
       const health = await routerHealth();
       const activity = health?.activity || {};
       if (Number(activity.activeCount || activity.active?.length || 0) > 0 || activity.state === "generating") {
@@ -297,7 +351,9 @@ function chromelessWindow(options) {
 // panel accordingly. Loading index.html without one left the island window
 // showing a full panel, which is why this is never assembled by hand.
 function loadView(window, view) {
-  window.loadFile(path.join(UI_DIR, "index.html"), { query: { view } });
+  window.loadFile(path.join(UI_DIR, "index.html"), {
+    query: { view, ...(settings.language ? { lang: settings.language } : {}) },
+  });
   // The panel is the whole app; external links belong in a browser, not in a
   // window with a privileged preload attached to it.
   window.webContents.setWindowOpenHandler(({ url }) => {
@@ -402,7 +458,8 @@ function buildTray() {
 // start without ever opening a window. Running under Electron is the real
 // condition, and it leaves the module inert for a plain-Node import.
 if (process.versions.electron) {
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
+    loadCompanionSettings();
     ipcMain.handle("router:invoke", (_event, command, args) => handleInvoke(command, args));
     try {
       buildTray();
@@ -410,9 +467,15 @@ if (process.versions.electron) {
       // A headless session has no tray host. The panel still works, which is
       // what an automated pass drives.
     }
-    // Panel first: it is the window an automated pass drives, and creating the
-    // pill ahead of it would make the pill the application's first window.
-    if (!process.env.CODEX_ROUTER_ELECTRON_TRAY_ONLY) showPanel();
+    let initialPresence = "always";
+    try {
+      const snapshot = await (await loadBridge()).runDesktopCommand("presence_status", {}, { root });
+      initialPresence = snapshot?.mode === "follow-codex" ? "follow-codex" : "always";
+    } catch {
+      // Fall back to always so a failed read cannot hide an expected surface.
+    }
+    presenceMode = initialPresence;
+    if (!process.env.CODEX_ROUTER_ELECTRON_TRAY_ONLY && initialPresence !== "follow-codex") showPanel();
     applyIslandVisibility();
     startPresenceObservation();
   });

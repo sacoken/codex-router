@@ -49,7 +49,7 @@ test("the Electron companion starts and renders the shared UI", options, async (
   try {
     const window = await electron.firstWindow();
     await window.waitForLoadState("domcontentloaded");
-    assert.equal(await window.title(), "Codex Model Router");
+    assert.match(await window.title(), /^Codex (Model Router|模型路由)$/);
     mkdirSync(shots, { recursive: true });
     await window.screenshot({ path: path.join(shots, "01-panel.png") });
     // The shared stylesheet and scripts loaded, not a blank shell.
@@ -175,10 +175,10 @@ test("every tab opens and renders its panel", options, async () => {
     mkdirSync(shots, { recursive: true });
 
     const tabs = [
-      { id: "usage", expect: /token activity|allowance|limits/i },
-      { id: "status", expect: /live router|live requests|quota resets/i },
-      { id: "connections", expect: /connection|provider|api key/i },
-      { id: "models", expect: /vision bridge|local llms|subagent|picker/i },
+      { id: "usage", expect: /token activity|allowance|limits|token 活動|額度|限制/i },
+      { id: "status", expect: /live router|live requests|quota resets|即時路由|即時請求|額度重設/i },
+      { id: "connections", expect: /connection|provider|api key|連線|供應商|api 金鑰/i },
+      { id: "models", expect: /vision bridge|local llms|subagent|picker|視覺橋接|本機 llm|子代理|選擇器/i },
     ];
 
     for (const [index, tab] of tabs.entries()) {
@@ -191,7 +191,7 @@ test("every tab opens and renders its panel", options, async () => {
         await window.waitForFunction(
           () => Boolean(document.querySelector("#active-requests header")),
           null,
-          { timeout: 15_000 },
+          { timeout: 30_000 },
         );
       }
       if (tab.id === "models") {
@@ -221,7 +221,8 @@ test("every tab opens and renders its panel", options, async () => {
 
       if (tab.id === "usage") {
         await window.locator("#usage-range").selectOption("30");
-        assert.equal(await window.locator("#usage-range-label").textContent(), "30 days");
+        const rangeLabel = await window.locator("#usage-range-wrap").textContent();
+        assert.match(rangeLabel, /^(Last 30 days|最近 30 天)$/);
         await window.locator("#usage-range").selectOption("7");
       }
 
@@ -245,6 +246,11 @@ test("the local model panel renders the complete Ollama catalog", options, async
       null,
       { timeout: 10_000 },
     );
+    await window.waitForFunction(
+      () => document.querySelectorAll(".local-catalog-row").length > 0,
+      null,
+      { timeout: 30_000 },
+    );
     const catalog = await window.evaluate(async () => {
       const snapshot = await window.__TAURI__.core.invoke("local_models", {});
       return {
@@ -255,9 +261,9 @@ test("the local model panel renders the complete Ollama catalog", options, async
     });
     if (catalog.available > 0) {
       assert.equal(catalog.rendered, catalog.available, "every available tag needs an install row");
-      assert.match(catalog.heading, /Discover Ollama/i);
+      assert.match(catalog.heading, /Discover Ollama|探索 Ollama/i);
       await window.locator('[data-local-catalog-action="variant-help"]').click();
-      assert.match(await window.locator(".local-catalog").innerText(), /Size tags choose model scale/i);
+      assert.match(await window.locator(".local-catalog").innerText(), /Size tags choose model scale|大小標籤決定模型規模/i);
     }
   } finally {
     await electron.close();

@@ -257,8 +257,14 @@ export function serviceHealthRows(health) {
   const rows = [{
     id: "router",
     label: "Router",
+    labelKey: "service.router",
     state: !routerKnown ? "unknown" : health.ok ? "ready" : degraded.size ? "degraded" : "offline",
     status: !routerKnown ? "Unknown" : health.ok ? "Ready" : degraded.size ? "Degraded" : "Offline",
+    statusKey: !routerKnown
+      ? "service.state.unknown"
+      : health.ok
+        ? "service.state.ready"
+        : degraded.size ? "service.state.degraded" : "service.state.offline",
     detail: !routerKnown
       ? "Waiting for health report"
       : health.ok
@@ -266,6 +272,14 @@ export function serviceHealthRows(health) {
         : degraded.size
           ? `${degraded.size} ${degraded.size === 1 ? "dependency needs" : "dependencies need"} attention`
           : "Health endpoint unavailable",
+    detailKey: !routerKnown
+      ? "service.detail.waiting"
+      : health.ok
+        ? "service.detail.servingLocally"
+        : degraded.size
+          ? degraded.size === 1 ? "service.detail.oneDependencyAttention" : "service.detail.dependenciesAttention"
+          : "service.detail.healthUnavailable",
+    detailCount: degraded.size,
   }];
 
   for (const [id, label] of SERVICE_ROWS) {
@@ -281,6 +295,7 @@ export function serviceHealthRows(health) {
     rows.push({
       id,
       label,
+      labelKey: `service.${id === "grokOauth" ? "grokOauthForwarder" : id === "oauth" ? "oauthForwarder" : id === "api" ? "apiForwarder" : id}`,
       state: !hasHealth || !service
         ? degraded.has(id) ? "offline" : inferredReady ? "ready" : "unknown"
         : service.enabled === false && !degraded.has(id)
@@ -294,14 +309,28 @@ export function serviceHealthRows(health) {
           ? "Standby"
           : service.reachable === false || degraded.has(id)
             ? "Offline"
-            : service.reachable === true ? "Ready" : "Unknown",
+          : service.reachable === true ? "Ready" : "Unknown",
+      statusKey: !hasHealth || !service
+        ? degraded.has(id) ? "service.state.offline" : inferredReady ? "service.state.ready" : "service.state.unknown"
+        : service.enabled === false && !degraded.has(id)
+          ? "service.state.standby"
+          : service.reachable === false || degraded.has(id)
+            ? "service.state.offline"
+            : service.reachable === true ? "service.state.ready" : "service.state.unknown",
       detail: !hasHealth || !service
         ? degraded.has(id) ? "Unreachable" : inferredReady ? "Reachable" : "Waiting for health report"
         : service.enabled === false && !degraded.has(id)
           ? "Not enabled"
           : service.reachable === false || degraded.has(id)
             ? "Unreachable"
-            : service.reachable === true ? "Reachable" : "Waiting for health report",
+          : service.reachable === true ? "Reachable" : "Waiting for health report",
+      detailKey: !hasHealth || !service
+        ? degraded.has(id) ? "service.detail.unreachable" : inferredReady ? "service.detail.reachable" : "service.detail.waiting"
+        : service.enabled === false && !degraded.has(id)
+          ? "service.detail.notEnabled"
+          : service.reachable === false || degraded.has(id)
+            ? "service.detail.unreachable"
+            : service.reachable === true ? "service.detail.reachable" : "service.detail.waiting",
     });
   }
 
@@ -310,9 +339,12 @@ export function serviceHealthRows(health) {
     rows.push({
       id: "forwarders",
       label: "External forwarders",
+      labelKey: "service.externalForwarders",
       state: hasHealth ? "standby" : "unknown",
       status: hasHealth ? "Standby" : "Unknown",
+      statusKey: hasHealth ? "service.state.standby" : "service.state.unknown",
       detail: hasHealth ? "No external forwarders enabled" : "Waiting for health report",
+      detailKey: hasHealth ? "service.detail.noForwarders" : "service.detail.waiting",
     });
   }
   return rows;
