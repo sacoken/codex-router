@@ -32,6 +32,15 @@ function Resolve-AccountSid([string]$Identity) {
   try {
     return ([Security.Principal.SecurityIdentifier]::new($Identity)).Value
   } catch {
+    # Task Scheduler can store the bare account name, and NTAccount cannot
+    # translate every local name in a non-domain PowerShell host. The current
+    # process token is the authoritative SID for that exact account.
+    $current = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $currentName = $current.Name
+    $currentAccount = ($currentName -split '\\')[-1]
+    if ($Identity -eq $currentName -or $Identity -eq $currentAccount) {
+      return $current.User.Value
+    }
     return ([Security.Principal.NTAccount]::new($Identity)).Translate(
       [Security.Principal.SecurityIdentifier]
     ).Value
@@ -290,7 +299,12 @@ switch ($Command) {
     if ($Action -eq "repair") {
       Write-Output "Repairing the tray task's permissions. If repair is needed, the companion will then be rebuilt or reinstalled (a small step), re-registered, and started by Task Scheduler at every logon."
       Repair-TrayTaskPermissions
+      # Windows keeps the running Electron executable locked, so an in-place
+      # dependency refresh fails while the old companion is still loaded.
       $Action = "install"
+      if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+        $Action = "rebuild"
+      }
     }
     # `rebuild` is `control tray rebuild`'s Windows half: build unconditionally
     # -- bypassing the source-fingerprint skip that `install` uses -- then
