@@ -166,6 +166,10 @@ async function handleInvoke(command, args) {
     panel?.hide();
     return null;
   }
+  if (command === "minimize_panel") {
+    panel?.minimize();
+    return null;
+  }
   if (command === "quit_app") {
     app.quit();
     return null;
@@ -329,12 +333,15 @@ function startPresenceObservation() {
 // button and rounded background -- the same reason tauri.conf.json sets
 // decorations:false. A native frame put a second title bar and a second set of
 // window controls above the ones already on screen.
+//
+// `resizable` is a per-window option. The panel takes it so the user can pull
+// the window smaller instead of only closing it; the activity pill keeps the
+// default (fixed) size because it is a status surface, not a work area.
 function chromelessWindow(options) {
   return new BrowserWindow({
     show: false,
     frame: false,
     transparent: true,
-    resizable: false,
     alwaysOnTop: true,
     skipTaskbar: true,
     webPreferences: {
@@ -373,21 +380,30 @@ function showPanel() {
       height: PANEL_HEIGHT,
       minWidth: PANEL_MIN_WIDTH,
       minHeight: PANEL_MIN_HEIGHT,
+      resizable: true,
       title: "Codex Model Router",
     });
     loadView(panel, "panel");
   }
-  // Anchored to the tray corner rather than wherever the window manager would
-  // put it. workArea already excludes the taskbar, so the margin is the whole
-  // adjustment -- the Tauri shell subtracts a taskbar allowance itself because
-  // it measures the full monitor.
-  const { workArea } = displayForCursor();
-  panel.setBounds({
-    width: PANEL_WIDTH,
-    height: PANEL_HEIGHT,
-    x: workArea.x + workArea.width - PANEL_WIDTH - EDGE_MARGIN,
-    y: workArea.y + workArea.height - PANEL_HEIGHT - EDGE_MARGIN,
-  });
+  // A minimized panel is an explicit user choice: leave it on the taskbar
+  // instead of un-minimizing it on every presence poll or tray-less re-show.
+  if (panel.isMinimized()) return;
+  // Only re-anchor a hidden panel. Re-anchoring a visible one on every
+  // presence poll reset any size or position the user had just chosen, which
+  // is why the window felt like it kept "popping back" after being adjusted.
+  if (!panel.isVisible()) {
+    // Anchored to the tray corner rather than wherever the window manager
+    // would put it. workArea already excludes the taskbar, so the margin is
+    // the whole adjustment -- the Tauri shell subtracts a taskbar allowance
+    // itself because it measures the full monitor.
+    const { workArea } = displayForCursor();
+    panel.setBounds({
+      width: PANEL_WIDTH,
+      height: PANEL_HEIGHT,
+      x: workArea.x + workArea.width - PANEL_WIDTH - EDGE_MARGIN,
+      y: workArea.y + workArea.height - PANEL_HEIGHT - EDGE_MARGIN,
+    });
+  }
   panel.show();
   panel.focus();
 }
@@ -475,7 +491,15 @@ if (process.versions.electron) {
       // Fall back to always so a failed read cannot hide an expected surface.
     }
     presenceMode = initialPresence;
-    if (!process.env.CODEX_ROUTER_ELECTRON_TRAY_ONLY && initialPresence !== "follow-codex") showPanel();
+    // A taskbar minimize keeps the panel merely "not visible" rather than
+    // hidden by the user, so the startup and presence showPanel() calls must
+    // not un-minimize it on every poll. Hiding and minimizing both leave
+    // isVisible() false, but only a hidden panel should be re-anchored and
+    // re-shown; a minimized one is restored by the user from the taskbar.
+    const shouldShow = () => !panel || !panel.isMinimized();
+    if (!process.env.CODEX_ROUTER_ELECTRON_TRAY_ONLY && initialPresence !== "follow-codex") {
+      if (shouldShow()) showPanel();
+    }
     applyIslandVisibility();
     startPresenceObservation();
   });

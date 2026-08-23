@@ -305,6 +305,48 @@ test("the panel and the pill are separate chromeless windows", options, async ()
   }
 });
 
+// A taskbar minimize leaves the panel merely "not visible", the same state as
+// a user-closed one. The presence poll must not un-minimize or re-anchor it,
+// and the panel itself must be resizable so "make it smaller" is possible at
+// all instead of only closing it.
+test("a minimized panel stays minimized and resizable through showPanel", options, async () => {
+  const electron = await launch();
+  try {
+    const window = await electron.firstWindow();
+    await window.waitForLoadState("domcontentloaded");
+
+    const resizable = await electron.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()
+        .filter((w) => w.webContents.getURL().includes("view=panel"))
+        .map((w) => w.isResizable()),
+    );
+    assert.deepEqual(resizable, [true], "the panel must be user-resizable");
+
+    await electron.evaluate(({ BrowserWindow }) => {
+      const panel = BrowserWindow.getAllWindows().find((w) =>
+        w.webContents.getURL().includes("view=panel"),
+      );
+      panel.minimize();
+    });
+
+    // showPanel is what the presence poll and the tray both call.
+    await window.evaluate(() => window.__TAURI__.core.invoke("show_panel", {}));
+
+    const state = await electron.evaluate(({ BrowserWindow }) =>
+      BrowserWindow.getAllWindows()
+        .filter((w) => w.webContents.getURL().includes("view=panel"))
+        .map((w) => ({ minimized: w.isMinimized(), visible: w.isVisible() })),
+    );
+    assert.deepEqual(
+      state,
+      [{ minimized: true, visible: false }],
+      "a minimized panel must not be restored by a re-show",
+    );
+  } finally {
+    await electron.close();
+  }
+});
+
 // The UI reads islandSupported/islandReason -- the camelCase serialization of
 // the Rust struct. The shell answered with an `island` key instead, which the
 // UI never looks at, so the switch could not reflect the real state.

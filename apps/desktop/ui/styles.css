@@ -105,6 +105,12 @@ button {
   padding: 13px 14px 8px 18px;
 }
 
+.panel-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .brand {
   display: flex;
   align-items: center;

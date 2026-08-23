@@ -101,6 +101,7 @@ function startPanel() {
     connectionsView: document.getElementById("connections-view"),
     modelsView: document.getElementById("models-view"),
     close: document.getElementById("close-panel"),
+    minimize: document.getElementById("minimize-panel"),
     routerStatus: document.getElementById("router-status"),
     liveState: document.getElementById("live-state"),
     source: document.getElementById("usage-source"),
@@ -199,6 +200,7 @@ function startPanel() {
     button.addEventListener("click", () => selectTab(button.dataset.tab));
   });
   elements.close.addEventListener("click", () => call("hide_panel"));
+  elements.minimize.addEventListener("click", () => call("minimize_panel"));
   elements.refresh.addEventListener("click", () => refreshPanel());
   elements.source.addEventListener("change", () => {
     state.selectedSource = elements.source.value;
