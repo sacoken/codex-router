@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  existsSync,
   chmodSync,
   mkdirSync,
   mkdtempSync,
@@ -21,6 +22,26 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dispatcher = path.join(root, "bin", "codex-router");
 const posixOnly = process.platform === "win32" ? "the POSIX dispatcher is not the Windows entry point" : false;
 
+function posixShell() {
+  const candidates = [
+    process.env.CODEX_ROUTER_POSIX_SHELL,
+    ...(process.platform === "win32"
+      ? [path.join(process.env.ProgramFiles || "", "Git", "bin", "sh.exe")]
+      : ["sh"]),
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (path.isAbsolute(candidate)) {
+      if (existsSync(candidate)) return candidate;
+    } else {
+      const result = spawnSync(candidate, ["-c", "exit 0"], { encoding: "utf8" });
+      if (!result.error) return candidate;
+    }
+  }
+  return undefined;
+}
+
+const shell = posixShell();
+
 function run(args, options = {}) {
   return spawnSync(dispatcher, args, { encoding: "utf8", ...options });
 }
@@ -38,7 +59,8 @@ function linkedCopy(target) {
 }
 
 test("bin/codex-router is valid POSIX shell", () => {
-  const result = spawnSync("sh", ["-n", dispatcher], { encoding: "utf8" });
+  test.skip(!shell, "a POSIX shell is not installed");
+  const result = spawnSync(shell, ["-n", dispatcher], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
 });
 

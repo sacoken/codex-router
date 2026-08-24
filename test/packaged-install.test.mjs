@@ -9,6 +9,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -23,6 +24,41 @@ function scratch(prefix) {
   return mkdtempSync(path.join(realpathSync(os.tmpdir()), prefix));
 }
 
+function removeScratch(directory) {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    try {
+      rmSync(directory, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      // Windows script hosts can hold the temporary launcher directory for a
+      // moment after the child exits; EPERM is transient there.
+      if (error.code !== "EPERM" || Date.now() >= deadline) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+    }
+  }
+}
+
+function posixShell() {
+  const candidates = [
+    process.env.CODEX_ROUTER_POSIX_SHELL,
+    ...(process.platform === "win32"
+      ? [path.join(process.env.ProgramFiles || "", "Git", "bin", "sh.exe")]
+      : ["sh"]),
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    if (path.isAbsolute(candidate)) {
+      if (existsSync(candidate)) return candidate;
+    } else {
+      const result = spawnSync(candidate, ["-c", "exit 0"], { encoding: "utf8" });
+      if (!result.error) return candidate;
+    }
+  }
+  return undefined;
+}
+
+const shell = posixShell();
+
 // Lifting the shipped function out of bin/install and running it, rather than
 // asserting on its text, is the same technique installer-scripts.test.mjs uses
 // for the dirty-checkout refusal: the test exercises the code that ships.
@@ -36,18 +72,20 @@ function packagedRefusalFunction() {
 }
 
 function runRefusal(packageManager, label) {
-  return spawnSync("sh", ["-s"], {
+  return spawnSync(shell, ["-s"], {
     input: `${packagedRefusalFunction()}\nCODEX_ROUTER_PACKAGE_MANAGER=${packageManager}\npackaged_dependency_refusal ${label}\n`,
     encoding: "utf8",
   });
 }
 
 test("bin/install is valid POSIX shell", () => {
-  const result = spawnSync("sh", ["-n", path.join(root, "bin", "install")], { encoding: "utf8" });
+  test.skip(!shell, "a POSIX shell is not installed");
+  const result = spawnSync(shell, ["-n", path.join(root, "bin", "install")], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
 });
 
 test("a Homebrew install is told to use brew reinstall", () => {
+  test.skip(!shell, "a POSIX shell is not installed");
   // The alternative is npm or uv failing on EACCES inside the keg, which names
   // a path the user cannot write and no command that would fix it.
   const result = runRefusal("homebrew", "LiteLLM");
@@ -58,6 +96,7 @@ test("a Homebrew install is told to use brew reinstall", () => {
 });
 
 test("an unrecognized package manager still gets an actionable refusal", () => {
+  test.skip(!shell, "a POSIX shell is not installed");
   // The env var is deliberately not an enum -- a future scoop or apt package
   // sets its own name -- so the fallback has to say something useful.
   const result = runRefusal("scoop", "Node");
@@ -88,7 +127,17 @@ function fakeSourceRoot() {
   mkdirSync(path.join(fake, "bin"), { recursive: true });
   for (const entry of ["config", "skills", "package.json", "requirements", "node_modules", "src"]) {
     const target = path.join(root, entry);
-    if (existsSync(target)) symlinkSync(target, path.join(fake, entry));
+    if (!existsSync(target)) continue;
+    const destination = path.join(fake, entry);
+    if (process.platform === "win32" && statSync(target).isDirectory()) {
+      // Directory junctions do not require Windows Developer Mode or an
+      // elevated token the way file and directory symlinks do.
+      symlinkSync(target, destination, "junction");
+    } else if (statSync(target).isDirectory()) {
+      symlinkSync(target, destination);
+    } else {
+      copyFileSync(target, destination);
+    }
   }
   // A packaged repair may regenerate configuration and services only when the
   // package-owned dependency tree is healthy. Keep this fixture on that path;
@@ -147,7 +196,7 @@ function runFix(env) {
         : undefined,
     };
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeScratch(dir);
   }
 }
 

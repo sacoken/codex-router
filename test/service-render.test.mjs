@@ -18,6 +18,20 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
+function removeScratch(directory) {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    try {
+      rmSync(directory, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      // wscript.exe can retain its temporary directory briefly after exiting.
+      if (error.code !== "EPERM" || Date.now() >= deadline) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+    }
+  }
+}
+
 function serviceEnv(platform, testRoot, target = "codex") {
   return {
     ...process.env,
@@ -230,7 +244,7 @@ test(
       assert.equal(statSync(unitPath).mode & 0o777, 0o600);
       assert.match(readFileSync(unitPath, "utf8"), /HTTPS_PROXY=/);
     } finally {
-      rmSync(testRoot, { recursive: true, force: true });
+      removeScratch(testRoot);
     }
   },
 );
@@ -461,7 +475,7 @@ test(
         );
       }
     } finally {
-      rmSync(testRoot, { recursive: true, force: true });
+      removeScratch(testRoot);
     }
   },
 );
@@ -470,8 +484,8 @@ test(
   "the Windows installer writes both launchers idempotently and uninstall removes both",
   { skip: process.platform === "win32" },
   () => {
-    const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-win-install-"));
-    try {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-win-install-"));
+  try {
       const stateDir = windowsStateDir(testRoot);
       const wrapperPath = path.join(stateDir, "start-codex-router.cmd");
       const launcherPath = path.join(stateDir, "start-codex-router-hidden.vbs");
@@ -504,7 +518,7 @@ test(
       // Uninstalling again must not fail on the already-removed launchers.
       assert.equal(run("uninstall").installed, false);
     } finally {
-      rmSync(testRoot, { recursive: true, force: true });
+      removeScratch(testRoot);
     }
   },
 );
