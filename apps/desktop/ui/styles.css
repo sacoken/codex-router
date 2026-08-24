@@ -2016,8 +2016,13 @@ h2 {
   box-shadow:
     0 13px 34px rgba(0, 0, 0, 0.38),
     inset 0 1px rgba(255, 255, 255, 0.045);
-  cursor: default;
+  cursor: grab;
+  -webkit-app-region: drag;
   transition: border-radius 180ms ease, border-color 180ms ease, background 180ms ease;
+}
+
+.island:active {
+  cursor: grabbing;
 }
 
 .island::before {
@@ -2049,11 +2054,11 @@ h2 {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: 22px minmax(82px, 1fr) auto 1px auto;
+  grid-template-columns: 22px minmax(76px, 1fr) auto 1px auto auto;
   gap: 9px;
   align-items: center;
   height: 42px;
-  padding: 0 13px;
+  padding: 0 28px 0 13px;
 }
 
 .activity-orbit {
@@ -2180,6 +2185,52 @@ h2 {
 
 .island-percent {
   width: 39px;
+}
+
+.island-action {
+  position: absolute;
+  top: 6px;
+  right: 7px;
+  z-index: 2;
+  display: grid;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 50%;
+  background: rgba(24, 30, 40, 0.9);
+  color: #b8c2d2;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+.island-action:hover {
+  border-color: rgba(112, 164, 255, 0.5);
+  color: white;
+}
+
+.island[data-minimized="true"] {
+  border-radius: 50%;
+  cursor: grab;
+}
+
+.island[data-minimized="true"] .island-compact,
+.island[data-minimized="true"] .island-expanded {
+  display: none;
+}
+
+.island[data-minimized="true"] .island-action {
+  inset: 7px;
+  top: 7px;
+  right: 7px;
+  width: auto;
+  height: auto;
+  font-size: 10px;
 }
 
 .island-expanded {

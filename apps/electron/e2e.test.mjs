@@ -416,6 +416,89 @@ test("toggling the pill off actually hides its window", options, async () => {
   }
 });
 
+test("the activity pill can minimize to a dot and keep its dragged position", options, async () => {
+  const electron = await launch();
+  try {
+    await (await electron.firstWindow()).waitForLoadState("domcontentloaded");
+
+    const islandState = () =>
+      electron.evaluate(({ BrowserWindow }) => {
+        const island = BrowserWindow.getAllWindows().find(
+          (w) => new URL(w.webContents.getURL()).searchParams.get("view") === "island",
+        );
+        const bounds = island.getBounds();
+        const content = island.getContentBounds();
+        return { ...bounds, contentWidth: content.width, contentHeight: content.height, visible: island.isVisible() };
+      });
+    const requireIslandState = async () => {
+      const state = await islandState();
+      assert.ok(state, "the activity pill window was never created");
+      return state;
+    };
+
+    // Click the shipped control, not a private bridge command: this also proves
+    // the no-drag button remains clickable inside the pill's draggable region.
+    await electron.evaluate(({ BrowserWindow }) => {
+      const island = BrowserWindow.getAllWindows().find(
+        (w) => new URL(w.webContents.getURL()).searchParams.get("view") === "island",
+      );
+      return island.webContents.executeJavaScript(
+        "document.getElementById('island-toggle').click()",
+      );
+    });
+    let state = await requireIslandState();
+    assert.equal(state.visible, true, "minimize must shrink the pill, not hide it");
+    assert.ok(Math.abs(state.contentWidth - 32) <= 2, `minimized width ${state.contentWidth}`);
+    assert.ok(Math.abs(state.contentHeight - 40) <= 2, `minimized height ${state.contentHeight}`);
+
+    // Restore first so the saved anchor applies to the normal-sized pill.
+    await electron.evaluate(({ BrowserWindow }) => {
+      const island = BrowserWindow.getAllWindows().find(
+        (w) => new URL(w.webContents.getURL()).searchParams.get("view") === "island",
+      );
+      return island.webContents.executeJavaScript(
+        "document.getElementById('island-toggle').click()",
+      );
+    });
+    state = await requireIslandState();
+    assert.ok(Math.abs(state.contentWidth - 326) <= 2, `restored width ${state.contentWidth}`);
+    assert.ok(Math.abs(state.contentHeight - 44) <= 2, `restored height ${state.contentHeight}`);
+
+    await electron.evaluate(({ BrowserWindow }) => {
+      const island = BrowserWindow.getAllWindows().find(
+        (w) => new URL(w.webContents.getURL()).searchParams.get("view") === "island",
+      );
+      island.setBounds({ ...island.getBounds(), x: 148, y: 92 });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 350));
+
+    await electron.evaluate(({ BrowserWindow }) => {
+      const island = BrowserWindow.getAllWindows().find(
+        (w) => new URL(w.webContents.getURL()).searchParams.get("view") === "island",
+      );
+      return island.webContents.executeJavaScript(
+        "document.getElementById('island-toggle').click()",
+      );
+    });
+    state = await requireIslandState();
+    assert.equal(state.x, 148, "minimize moved the dragged pill back to its default anchor");
+    assert.equal(state.y, 92, "minimize moved the dragged pill vertically");
+
+    await electron.evaluate(({ BrowserWindow }) => {
+      const island = BrowserWindow.getAllWindows().find(
+        (w) => new URL(w.webContents.getURL()).searchParams.get("view") === "island",
+      );
+      return island.webContents.executeJavaScript(
+        "document.getElementById('island-toggle').click()",
+      );
+    });
+    state = await requireIslandState();
+    assert.deepEqual({ x: state.x, y: state.y }, { x: 148, y: 92 }, "restore lost the dragged position");
+  } finally {
+    await electron.close();
+  }
+});
+
 test("the panel survives a reload without losing its bridge", options, async () => {
   // The tray reopens the panel repeatedly over a session; a bridge that only
   // attaches on first load would work once and then quietly stop.

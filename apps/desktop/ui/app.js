@@ -2017,6 +2017,7 @@ function startIsland() {
     providerUsage: null,
     providerSetup: null,
     expanded: false,
+    minimized: urlParams.get("minimized") === "1",
     healthPending: false,
     usagePending: false,
   };
@@ -2030,21 +2031,34 @@ function startIsland() {
     week: document.getElementById("island-week"),
     line: document.getElementById("island-line-path"),
     area: document.getElementById("island-area-path"),
+    toggle: document.getElementById("island-toggle"),
   };
   const thinkingOrb = elements.orbit
     ? createThinkingOrb(elements.orbit, { size: 18, dark: true })
     : null;
 
-  elements.root.addEventListener("pointerenter", () => setExpanded(true));
+  elements.root.addEventListener("pointerenter", () => {
+    if (!state.minimized) setExpanded(true);
+  });
   elements.root.addEventListener("pointerleave", () => setExpanded(false));
-  elements.root.addEventListener("click", () => call("show_panel"));
+  elements.root.addEventListener("click", () => {
+    if (!state.minimized) call("show_panel");
+  });
+  elements.toggle?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setMinimized(!state.minimized);
+  });
 
   if (!invoke) {
     elements.state.textContent = t("status.unavailable");
     elements.root.dataset.state = "offline";
+    elements.root.dataset.minimized = String(state.minimized);
+    renderMinimizedState();
     return;
   }
 
+  elements.root.dataset.minimized = String(state.minimized);
+  renderMinimizedState();
   refreshIslandUsage();
   refreshIslandHealth();
   window.setInterval(refreshIslandHealth, 750);
@@ -2135,6 +2149,7 @@ function startIsland() {
   }
 
   async function setExpanded(expanded) {
+    if (state.minimized && expanded) return;
     if (state.expanded === expanded) return;
     state.expanded = expanded;
     elements.root.classList.toggle("is-expanded", expanded);
@@ -2143,6 +2158,26 @@ function startIsland() {
     } catch {
       state.expanded = false;
       elements.root.classList.remove("is-expanded");
+    }
+  }
+
+  function renderMinimizedState() {
+    elements.root.dataset.minimized = String(state.minimized);
+    elements.toggle.setAttribute("aria-label", state.minimized ? t("island.restore") : t("actions.minimize"));
+    elements.toggle.title = state.minimized ? t("island.restore") : t("actions.minimize");
+    elements.toggle.textContent = state.minimized ? "+" : "–";
+  }
+
+  async function setMinimized(minimized) {
+    const previous = state.minimized;
+    state.minimized = minimized;
+    renderMinimizedState();
+    try {
+      await call("set_island_minimized", { minimized });
+      if (!minimized) await setExpanded(false);
+    } catch {
+      state.minimized = previous;
+      renderMinimizedState();
     }
   }
 }

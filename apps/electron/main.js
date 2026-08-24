@@ -30,6 +30,10 @@ const PANEL_MIN_WIDTH = 360;
 const PANEL_MIN_HEIGHT = 520;
 const ISLAND_WIDTH = 326;
 const ISLAND_HEIGHT = 44;
+// Chromium/Windows will not grant a frameless window its requested 24px width;
+// 32px is the practical minimum. The visible control remains a small dot.
+const ISLAND_MINIMIZED_WIDTH = 32;
+const ISLAND_MINIMIZED_HEIGHT = 40;
 const ISLAND_EXPANDED_WIDTH = 410;
 const ISLAND_EXPANDED_HEIGHT = 122;
 const EDGE_MARGIN = 16;
@@ -52,6 +56,7 @@ let root;
 let tray;
 let panel;
 let island;
+let islandPositionTimer;
 let presenceTimer;
 let presenceStopTimer;
 let presenceMode = "always";
@@ -77,6 +82,15 @@ function readCompanionSettings() {
     return {
       islandEnabled: value.islandEnabled !== false,
       islandExpanded: value.islandExpanded === true,
+      islandMinimized: value.islandMinimized === true,
+      islandPosition:
+        Number.isFinite(Number(value.islandPosition?.x)) &&
+        Number.isFinite(Number(value.islandPosition?.y))
+          ? {
+              x: Math.round(Number(value.islandPosition.x)),
+              y: Math.round(Number(value.islandPosition.y)),
+            }
+          : undefined,
       language: typeof value.language === "string" ? value.language : undefined,
     };
   } catch {
@@ -84,7 +98,7 @@ function readCompanionSettings() {
   }
 }
 
-const settings = { islandEnabled: true, islandExpanded: false };
+const settings = { islandEnabled: true, islandExpanded: false, islandMinimized: false };
 
 function loadCompanionSettings() {
   Object.assign(settings, readCompanionSettings());
@@ -155,10 +169,12 @@ async function handleInvoke(command, args) {
     return { ...settings };
   }
   if (command === "set_island_expanded") {
-    // Hovering the pill expands it into the seven-day graph, so this both
-    // resizes and re-centres: the wider window centred on the old width would
-    // sit off-centre by half the difference.
     settings.islandExpanded = Boolean(args.expanded);
+    if (settings.islandEnabled) showIsland(settings.islandExpanded);
+    return { ...settings };
+  }
+  if (command === "set_island_minimized") {
+    settings.islandMinimized = Boolean(args.minimized);
     if (settings.islandEnabled) showIsland(settings.islandExpanded);
     return { ...settings };
   }
@@ -378,7 +394,11 @@ function chromelessWindow(options) {
 // showing a full panel, which is why this is never assembled by hand.
 function loadView(window, view) {
   window.loadFile(path.join(UI_DIR, "index.html"), {
-    query: { view, ...(settings.language ? { lang: settings.language } : {}) },
+    query: {
+      view,
+      ...(view === "island" && settings.islandMinimized ? { minimized: "1" } : {}),
+      ...(settings.language ? { lang: settings.language } : {}),
+    },
   });
   // The panel is the whole app; external links belong in a browser, not in a
   // window with a privileged preload attached to it.
@@ -464,24 +484,61 @@ function showIsland(expanded) {
       height: ISLAND_HEIGHT,
       title: "Router activity",
       hasShadow: false,
+      // Windows adds an invisible resize frame even to frameless windows; the
+      // pill does not need edge resizing, and that frame would keep a "small"
+      // dot larger than requested.
+      thickFrame: false,
       // The pill reports what the router is doing while someone works in
       // another application; taking focus would interrupt the very thing it
       // exists to report on.
       focusable: false,
     });
     loadView(island, "island");
+
+    // Persist user moves, but not every intermediate event during a drag.
+    island.on("move", () => {
+      if (!island || island.isDestroyed()) return;
+      clearTimeout(islandPositionTimer);
+      islandPositionTimer = setTimeout(() => {
+        const { x, y } = island.getBounds();
+        settings.islandPosition = { x, y };
+        saveCompanionSettings();
+      }, 250);
+    });
   }
-  const width = expanded ? ISLAND_EXPANDED_WIDTH : ISLAND_WIDTH;
-  const height = expanded ? ISLAND_EXPANDED_HEIGHT : ISLAND_HEIGHT;
-  // Top-center of the display the cursor is on, matching position_island.
-  const { bounds } = displayForCursor();
-  island.setBounds({
-    width,
-    height,
-    x: Math.round(bounds.x + (bounds.width - width) / 2),
-    y: bounds.y + ISLAND_TOP_MARGIN,
-  });
+  const width = settings.islandMinimized
+    ? ISLAND_MINIMIZED_WIDTH
+    : expanded
+      ? ISLAND_EXPANDED_WIDTH
+      : ISLAND_WIDTH;
+  const height = settings.islandMinimized
+    ? ISLAND_MINIMIZED_HEIGHT
+    : expanded
+      ? ISLAND_EXPANDED_HEIGHT
+      : ISLAND_HEIGHT;
+  let position = settings.islandPosition;
+  if (!isIslandOnScreen(position, width, height)) {
+    // First launch only. Once a position exists, a user-placed pill wins over
+    // this default and survives expansion and restarts.
+    const { bounds } = displayForCursor();
+    position = {
+      x: Math.round(bounds.x + (bounds.width - width) / 2),
+      y: bounds.y + ISLAND_TOP_MARGIN,
+    };
+    settings.islandPosition = position;
+  }
+  island.setBounds({ width, height, ...position });
   island.showInactive();
+}
+
+function isIslandOnScreen(position, width, height) {
+  if (!position) return false;
+  return screen.getAllDisplays().some(({ bounds }) => (
+    position.x < bounds.x + bounds.width &&
+    position.x + width > bounds.x &&
+    position.y < bounds.y + bounds.height &&
+    position.y + height > bounds.y
+  ));
 }
 
 function applyIslandVisibility() {
@@ -509,6 +566,7 @@ function buildTray() {
         click: (item) => {
           settings.islandEnabled = item.checked;
           applyIslandVisibility();
+          saveCompanionSettings();
         },
       },
       { type: "separator" },
