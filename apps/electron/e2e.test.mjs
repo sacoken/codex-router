@@ -39,10 +39,16 @@ async function launch() {
     env: {
       ...process.env,
       MODEL_ROUTER_SOURCE_ROOT: root,
+      // A follow-codex machine would hide the surfaces behind the host-app
+      // poll; the suite asserts their default behaviour, so pin presence to
+      // always for the duration of the automated pass.
+      MODEL_ROUTER_PRESENCE_STATE: path.join(shots, "presence.test.json"),
       CODEX_ROUTER_ELECTRON_TRAY_ONLY: "",
     },
   });
 }
+
+mkdirSync(shots, { recursive: true });
 
 test("the Electron companion starts and renders the shared UI", options, async () => {
   const electron = await launch();
@@ -305,42 +311,62 @@ test("the panel and the pill are separate chromeless windows", options, async ()
   }
 });
 
-// A taskbar minimize leaves the panel merely "not visible", the same state as
-// a user-closed one. The presence poll must not un-minimize or re-anchor it,
-// and the panel itself must be resizable so "make it smaller" is possible at
-// all instead of only closing it.
-test("a minimized panel stays minimized and resizable through showPanel", options, async () => {
+// The two ways off the screen are not the same: a presence poll is machinery
+// and must leave a minimized panel alone, but a tray click is the user asking
+// for the window back and has to restore it. The panel is also resizable so
+// "make it smaller" is possible at all instead of only closing it.
+test("the poll leaves a minimized panel down, but an explicit open restores it", options, async () => {
   const electron = await launch();
   try {
     const window = await electron.firstWindow();
     await window.waitForLoadState("domcontentloaded");
 
-    const resizable = await electron.evaluate(({ BrowserWindow }) =>
-      BrowserWindow.getAllWindows()
-        .filter((w) => w.webContents.getURL().includes("view=panel"))
-        .map((w) => w.isResizable()),
-    );
-    assert.deepEqual(resizable, [true], "the panel must be user-resizable");
-
-    await electron.evaluate(({ BrowserWindow }) => {
-      const panel = BrowserWindow.getAllWindows().find((w) =>
-        w.webContents.getURL().includes("view=panel"),
+    const panelState = () =>
+      electron.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()
+          .filter((w) => {
+            try {
+              return new URL(w.webContents.getURL()).searchParams.get("view") === "panel";
+            } catch {
+              return false;
+            }
+          })
+          .map((w) => ({
+            minimized: w.isMinimized(),
+            visible: w.isVisible(),
+            resizable: w.isResizable(),
+          })),
       );
-      panel.minimize();
-    });
 
-    // showPanel is what the presence poll and the tray both call.
-    await window.evaluate(() => window.__TAURI__.core.invoke("show_panel", {}));
+    const [initial] = await panelState();
+    assert.equal(initial.resizable, true, "the panel must be user-resizable");
 
-    const state = await electron.evaluate(({ BrowserWindow }) =>
-      BrowserWindow.getAllWindows()
-        .filter((w) => w.webContents.getURL().includes("view=panel"))
-        .map((w) => ({ minimized: w.isMinimized(), visible: w.isVisible() })),
-    );
+    // Minimize through the same IPC the header button uses, then poll the way
+    // the presence observer does (applyPresenceVisibility): the window must
+    // stay down.
+    await window.evaluate(() => window.__TAURI__.core.invoke("minimize_panel", {}));
+    let [state] = await panelState();
+    assert.equal(state.minimized, true, "minimize_panel did not minimize the panel");
+
+    // main.showPanelMachinery is the presence poll's own door; calling it
+    // through IPC would clear the dismissal, so the test reaches into the
+    // main process through a small registered hook instead.
+    await window.evaluate(() => window.__TAURI__.core.invoke("test_show_panel_machinery", {}));
+    [state] = await panelState();
     assert.deepEqual(
-      state,
-      [{ minimized: true, visible: false }],
-      "a minimized panel must not be restored by a re-show",
+      { minimized: state.minimized, visible: state.visible },
+      { minimized: true, visible: false },
+      "the machinery must not restore a dismissed panel",
+    );
+
+    // The tray click, tray menu and the app's own open bridge all walk through
+    // handleInvoke("show_panel"), and that door always wins.
+    await window.evaluate(() => window.__TAURI__.core.invoke("show_panel", {}));
+    [state] = await panelState();
+    assert.deepEqual(
+      { minimized: state.minimized, visible: state.visible },
+      { minimized: false, visible: true },
+      "an explicit open must restore a minimized panel",
     );
   } finally {
     await electron.close();

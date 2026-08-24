@@ -57,6 +57,10 @@ let presenceStopTimer;
 let presenceMode = "always";
 let hostAppRunning = true;
 let serviceIntent = "unknown";
+// Set by the close and minimize controls; cleared by an explicit open (tray,
+// menu, bridge) or by Codex itself coming back. The presence poll honours it
+// so a dismissed panel stays down instead of popping back every few seconds.
+let panelDismissed = false;
 // islandEnabled starts true, as it does in the Tauri shell's Settings::default.
 // Starting it false meant the switch read "off" on first launch and the pill
 // never appeared until someone found and flipped it.
@@ -163,11 +167,21 @@ async function handleInvoke(command, args) {
     return null;
   }
   if (command === "hide_panel") {
+    panelDismissed = true;
     panel?.hide();
     return null;
   }
   if (command === "minimize_panel") {
+    panelDismissed = true;
     panel?.minimize();
+    return null;
+  }
+  // Test-only handle: the e2e drives the presence poll's door without going
+  // through the dismissal-clearing showPanel IPC. It only answers under the
+  // automated pass's marker, so unknown commands stay refused everywhere
+  // else.
+  if (command === "test_show_panel_machinery" && process.env.CODEX_ROUTER_ELECTRON_TRAY_ONLY === "") {
+    showPanelMachinery();
     return null;
   }
   if (command === "quit_app") {
@@ -226,6 +240,9 @@ async function hostApplicationRunning() {
 function applyPresenceVisibility(visible) {
   if (!visible) {
     panel?.hide();
+    // Codex itself went away, so any dismissal belongs to the old session.
+    // When it comes back the panel follows it up again, as follow mode says.
+    panelDismissed = false;
     if (island && !island.isDestroyed()) island.hide();
     if (tray && !tray.isDestroyed()) {
       tray.destroy();
@@ -241,8 +258,10 @@ function applyPresenceVisibility(visible) {
       // the app bridge and the next poll retries once a desktop is available.
     }
   }
-  // Follow mode brings the full panel back with Codex, not only the tray and pill.
-  if (presenceMode === "follow-codex") showPanel();
+  // Follow mode brings the full panel back with Codex, not only the tray and
+  // pill. This is the poll's door, so a dismissed panel stays down until the
+  // user asks for it back through the tray.
+  if (presenceMode === "follow-codex") showPanelMachinery();
   applyIslandVisibility();
 }
 
@@ -374,7 +393,36 @@ function displayForCursor() {
 }
 
 function showPanel() {
+  openPanel();
+}
+
+// The presence poll's own door. applyPresenceVisibility cannot call the
+// generic openPanel: that clears the dismissal and restores a minimized
+// window, which is exactly what a background poll must never do.
+function showPanelMachinery() {
+  if (!panel || panel.isDestroyed()) return;
+  if (panelDismissed || panel.isMinimized()) return;
+  // Re-anchor only a hidden panel; a visible one keeps whatever size and
+  // position the user gave it.
+  if (!panel.isVisible()) {
+    const { workArea } = displayForCursor();
+    panel.setBounds({
+      width: PANEL_WIDTH,
+      height: PANEL_HEIGHT,
+      x: workArea.x + workArea.width - PANEL_WIDTH - EDGE_MARGIN,
+      y: workArea.y + workArea.height - PANEL_HEIGHT - EDGE_MARGIN,
+    });
+  }
+  panel.show();
+  panel.focus();
+}
+
+// The single door an explicit open walks through: tray click, tray menu and
+// the bridge's show_panel all clear the dismissal before surfacing the
+// window, so a user action always wins over the poll's "leave it down".
+function openPanel() {
   if (!panel || panel.isDestroyed()) {
+    panelDismissed = false;
     panel = chromelessWindow({
       width: PANEL_WIDTH,
       height: PANEL_HEIGHT,
@@ -385,9 +433,10 @@ function showPanel() {
     });
     loadView(panel, "panel");
   }
-  // A minimized panel is an explicit user choice: leave it on the taskbar
-  // instead of un-minimizing it on every presence poll or tray-less re-show.
-  if (panel.isMinimized()) return;
+  panelDismissed = false;
+  // The open is explicit, so a minimized window is restored rather than left
+  // on the taskbar; restore() already makes it visible again.
+  if (panel.isMinimized()) panel.restore();
   // Only re-anchor a hidden panel. Re-anchoring a visible one on every
   // presence poll reset any size or position the user had just chosen, which
   // is why the window felt like it kept "popping back" after being adjusted.
@@ -491,14 +540,8 @@ if (process.versions.electron) {
       // Fall back to always so a failed read cannot hide an expected surface.
     }
     presenceMode = initialPresence;
-    // A taskbar minimize keeps the panel merely "not visible" rather than
-    // hidden by the user, so the startup and presence showPanel() calls must
-    // not un-minimize it on every poll. Hiding and minimizing both leave
-    // isVisible() false, but only a hidden panel should be re-anchored and
-    // re-shown; a minimized one is restored by the user from the taskbar.
-    const shouldShow = () => !panel || !panel.isMinimized();
     if (!process.env.CODEX_ROUTER_ELECTRON_TRAY_ONLY && initialPresence !== "follow-codex") {
-      if (shouldShow()) showPanel();
+      showPanel();
     }
     applyIslandVisibility();
     startPresenceObservation();
@@ -517,4 +560,4 @@ if (process.versions.electron) {
   app.on("window-all-closed", () => {});
 }
 
-module.exports = { handleInvoke, routerHealth, showPanel };
+module.exports = { handleInvoke, routerHealth, showPanel, openPanel };
